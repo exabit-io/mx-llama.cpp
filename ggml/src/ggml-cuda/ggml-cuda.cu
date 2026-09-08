@@ -1266,8 +1266,17 @@ static bool ggml_backend_cuda_comm_allreduce_custom_prepare(
     if (!comm_ctx->custom_ar.broadcast_ok && s_have_nccl && !s_force_oneshot) {
         return false;
     }
+    // GGML_TP_AR_MAX_NE=<elements>: explicit size gate (messages with fewer elements take the custom path, the rest
+    // NCCL/RCCL). gfx906 XGMI hive 2026-09-08: the peer-write broadcast wins at one decode row (+14% single stream)
+    // and loses at 8-16 rows (-8%), so the default 262144 is far too high there.
+    static const int64_t s_max_ne = []{
+        const char * e = getenv("GGML_TP_AR_MAX_NE");
+        return (e && e[0] != '\0') ? (int64_t) atoll(e) : (int64_t) 0;
+    }();
     bool eligible = true;
-    if (s_gate_on && s_have_nccl) {
+    if (s_max_ne > 0) {
+        eligible = ne < s_max_ne;
+    } else if (s_gate_on && s_have_nccl) {
         // Small-vs-large threshold from upstream's NCCL heuristic. Below this,
         // broadcast wins on TG by 14-30%; above this, NCCL BF16 ring is faster.
         eligible = (n_backends <= 2 && ne < 32768) ||
