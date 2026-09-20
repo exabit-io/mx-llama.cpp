@@ -4,6 +4,45 @@
 
 constexpr int gdn_cols_per_warp = 4;
 
+// Sum of squares of the head vector one column segment holds (lanes_per_col lanes, lane t holding x[r*lanes_per_col + t]
+// for r < rows_per_lane), reproducing the standalone l2_norm_f32<32> bit for bit where the shapes allow it: that kernel
+// runs 32 threads per row, thread T accumulating x[T], x[T+32], x[T+64], ... in that order (fused multiply-adds), then a
+// 32-wide xor tree. With 32 lanes per segment lane t is thread t. With 16 (a 64-lane warp holding four columns) lane t
+// holds the values of threads t (even r) and t+16 (odd r) and runs both chains. The generic tree adds them first (offset
+// 16), the GCN DPP tree adds them last (offset 1 first), so the 16-wide reduction follows the same order. Other shapes
+// fall back to a plain reduction (same values up to rounding order).
+template <int lanes_per_col, int rows_per_lane>
+static __device__ __forceinline__ float gdn_l2_sumsq(const float * v) {
+    if constexpr (lanes_per_col == 32) {
+        float tmp = 0.0f;
+#pragma unroll
+        for (int r = 0; r < rows_per_lane; r++) {
+            tmp = fmaf(v[r], v[r], tmp);
+        }
+        return warp_reduce_sum<32>(tmp);
+    } else if constexpr (lanes_per_col == 16 && rows_per_lane % 2 == 0) {
+        float even = 0.0f;
+        float odd  = 0.0f;
+#pragma unroll
+        for (int r = 0; r < rows_per_lane; r += 2) {
+            even = fmaf(v[r],     v[r],     even);
+            odd  = fmaf(v[r + 1], v[r + 1], odd);
+        }
+#if defined(GGML_USE_HIP) && defined(GCN) && !defined(GGML_GCN_NO_DPP)
+        return warp_reduce_sum<16>(even) + warp_reduce_sum<16>(odd);
+#else
+        return warp_reduce_sum<16>(even + odd);
+#endif
+    } else {
+        float ss = 0.0f;
+#pragma unroll
+        for (int r = 0; r < rows_per_lane; r++) {
+            ss += v[r] * v[r];
+        }
+        return warp_reduce_sum<lanes_per_col>(ss);
+    }
+}
+
 template <int S_v, bool KDA, bool keep_rs_t, int cols_per_warp = gdn_cols_per_warp>
 __global__ void __launch_bounds__((ggml_cuda_get_physical_warp_size() < S_v ? ggml_cuda_get_physical_warp_size() : S_v) * 4, 2)
 gated_delta_net_cuda(const float * q,
@@ -94,26 +133,14 @@ gated_delta_net_cuda(const float * q,
         // folded L2 norms (same arithmetic as l2_norm_f32: x * rsqrt(max(sum x^2, eps^2)) over the head vector, which
         // each column segment of this warp holds in full across its lanes_per_col lanes)
         if (pf.norm_k) {
-            float ss = 0.0f;
-#pragma unroll
-            for (int r = 0; r < rows_per_lane; r++) {
-                ss += k_reg[r] * k_reg[r];
-            }
-            ss = warp_reduce_sum<lanes_per_col>(ss);
-            const float sc = rsqrtf(fmaxf(ss, pf.eps_k * pf.eps_k));
+            const float sc = rsqrtf(fmaxf(gdn_l2_sumsq<lanes_per_col, rows_per_lane>(k_reg), pf.eps_k * pf.eps_k));
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
                 k_reg[r] *= sc;
             }
         }
         if (pf.norm_q) {
-            float ss = 0.0f;
-#pragma unroll
-            for (int r = 0; r < rows_per_lane; r++) {
-                ss += q_reg[r] * q_reg[r];
-            }
-            ss = warp_reduce_sum<lanes_per_col>(ss);
-            const float sc = rsqrtf(fmaxf(ss, pf.eps_q * pf.eps_q));
+            const float sc = rsqrtf(fmaxf(gdn_l2_sumsq<lanes_per_col, rows_per_lane>(q_reg), pf.eps_q * pf.eps_q));
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
                 q_reg[r] *= sc;
