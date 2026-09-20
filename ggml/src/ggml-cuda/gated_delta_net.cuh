@@ -21,6 +21,11 @@ struct ggml_cuda_gdn_prefuse_dev {
     bool          gate_alpha = false; // g = softplus(alpha + dt_bias[h]) * ssm_a[h]
     float         eps_q      = 0.0f;
     float         eps_k      = 0.0f;
+    // kind 0: ggml_l2_norm semantics  x * rsqrt(max(sum x^2, eps^2));  kind 1 (upstream build_gdn_l2_norm since #28068):
+    // scale(rms_norm(x, eps/n), 1/sqrt(n)) = x * rsqrt(sum x^2 / n + eps') * s
+    int           norm_kind  = 0;
+    float         scale_q    = 1.0f;
+    float         scale_k    = 1.0f;
     const float * dt_bias    = nullptr;
     const float * ssm_a      = nullptr;
 };
