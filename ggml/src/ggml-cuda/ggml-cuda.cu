@@ -3590,8 +3590,8 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         // up to 24 tokens few-row MMQ is faster than MMQ, on DGX Spark also faster than MMVQ
         const bool use_mmq_few = ggml_cuda_should_use_mmq_few(src0, src1, ids, cc);
 
-        static_assert(MMVQ_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
-        if (!use_mmq_few && ne2 <= MMVQ_MAX_BATCH_SIZE) {
+        static_assert(MMVQ_MMID_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
+        if (!use_mmq_few && ne2 <= MMVQ_MMID_MAX_BATCH_SIZE) {
             if (ggml_is_quantized(src0->type)) {
                 const int mmvq_mmid_max = get_mmvq_mmid_max_batch(src0->type, cc);
                 if (ne2 <= mmvq_mmid_max) {
