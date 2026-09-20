@@ -1133,7 +1133,10 @@ static __device__ __forceinline__ void mul_mat_vec_repacked_nc_impl(
 }
 
 template <int ROWS, int NWAVES, int NCOLS, int RPL = 1, int LANES = 64, ggml_type WT = GGML_TYPE_Q8_0>
-static __global__ void mul_mat_vec_repacked_nc(
+// Without a bound the compiler sizes registers for a 1024-thread block (64
+// VGPRs on gfx906) and the 2-row 64-lane instantiations spill from 11 columns
+// up (18 VGPR spills, 52 B scratch at 16). The block is NWAVES waves.
+static __global__ void __launch_bounds__(NWAVES * 64) mul_mat_vec_repacked_nc(
         const uint8_t * __restrict__ wbase, const block_q8_1 * __restrict__ xq,
         float * __restrict__ y, const uint32_t ne0, const uint32_t ne1,
         const uint32_t xs, const uint32_t ys) {
