@@ -4545,6 +4545,51 @@ static bool ggml_cuda_moe_weighted_reduction_enabled() {
     return enabled;
 }
 
+// gfx906 fusion 2026-09-08: when a fused RMS_NORM(+MUL[+ADD]) feeds quantised matrix-vector products (decode), let the norm
+// kernel also emit the Q8_1 copy of its output into the per-graph q8_1 cache, so every consumer's quantize launch becomes a
+// cache hit. The M1 kernel trace counted 257 quantize launches per decode token (1.0 ms of a 21.5 ms token on the split).
+// Returns the cache buffer to fill, or nullptr when the pattern does not apply. GGML_CUDA_NORM_Q8=0 disables it.
+static void * ggml_cuda_rms_norm_q8_target(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, const int i_out) {
+    static const bool enabled = [] {
+        const char * e = getenv("GGML_CUDA_NORM_Q8");
+        return e == nullptr || atoi(e) != 0;
+    }();
+    if (!enabled) {
+        return nullptr;
+    }
+    const ggml_tensor * out = cgraph->nodes[i_out];
+    if (out->type != GGML_TYPE_F32 || !ggml_is_contiguous(out) ||
+        out->ne[0] % MATRIX_ROW_PADDING != 0 || out->ne[1] > MMVQ_MAX_BATCH_SIZE || out->ne[2] != 1 || out->ne[3] != 1) {
+        return nullptr;
+    }
+    bool has_mmvq_consumer = false;
+    const int i_end = std::min(cgraph->n_nodes, i_out + 1 + 64);
+    for (int j = i_out + 1; j < i_end; ++j) {
+        const ggml_tensor * n = cgraph->nodes[j];
+        if (n->op == GGML_OP_MUL_MAT && n->src[1] == out && n->type == GGML_TYPE_F32 &&
+            ggml_is_quantized(n->src[0]->type) && n->src[0]->type != GGML_TYPE_NVFP4 && n->src[0]->type != GGML_TYPE_MXFP4) {
+            has_mmvq_consumer = true;
+            break;
+        }
+    }
+    if (!has_mmvq_consumer) {
+        return nullptr;
+    }
+    // Same key as ggml_cuda_mul_mat_vec_q builds for src1 == out.
+    const size_t  ts          = ggml_type_size(out->type);
+    const int64_t ne10_padded = GGML_PAD(out->ne[0], MATRIX_ROW_PADDING);
+    const size_t  nbytes      = out->ne[3]*out->ne[2] * out->ne[1]*ne10_padded * sizeof(block_q8_1)/QK8_1;
+    bool hit = false;
+    char * buf = ggml_cuda_q8_1_cache_acquire(ctx, out, /*variant =*/ 0, ne10_padded,
+                                              out->nb[1] / ts, out->nb[2] / ts, out->nb[3] / ts, nbytes, hit);
+    static bool logged = false;
+    if (buf != nullptr && !logged) {
+        logged = true;
+        GGML_LOG_INFO("%s: rms_norm + q8_1 fusion active (ncols %" PRId64 ", rows %" PRId64 ")\n", __func__, out->ne[0], out->ne[1]);
+    }
+    return buf;
+}
+
 // try and fuse nodes and return the number of nodes to skip
 static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
 
@@ -5320,12 +5365,14 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     }
 
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ADD }, {})) {
-        ggml_cuda_op_rms_norm_fused_add(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2]);
+        void * q8_out = ggml_cuda_rms_norm_q8_target(*cuda_ctx, cgraph, i + 2);
+        ggml_cuda_op_rms_norm_fused_add(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2], q8_out);
         return 2;
     }
 
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL }, {})) {
-        ggml_cuda_op_rms_norm_fused(*cuda_ctx, node, cgraph->nodes[i + 1]);
+        void * q8_out = ggml_cuda_rms_norm_q8_target(*cuda_ctx, cgraph, i + 1);
+        ggml_cuda_op_rms_norm_fused(*cuda_ctx, node, cgraph->nodes[i + 1], q8_out);
         return 1;
     }
 
