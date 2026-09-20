@@ -234,17 +234,14 @@ static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_am
     return 0;
 }
 
-// GCN (gfx906, Vega 20): the generic AMD table above is the RDNA2-inherited one. Head size 256 (Qwen3.8-27B: GQA 6, 16
-// KV heads of 256) was swept by alex4300 (llama.cpp-gfx906-opt, docs/gfx906/ergebnis-langkontext-2026-09-03.md) over
-// threads / occupancy / rows / columns per tile on an MI50 in the Qwen3.8 geometry at 16K f16 KV. us per layer, old -> new:
-// n=1 207 -> 191, n=2 267 -> 251, n=4 283 -> 261, n=8 451 -> 350; prefill batch 512: 23.8 -> 21.6 ms. Decode wants small
-// tiles at high occupancy, prefill large tiles at 512 threads. Other head sizes fall through to the generic AMD table.
+// GCN (gfx906, Vega 20). The generic AMD table above is the RDNA2-inherited one; it was swept on the four-die box at 32K depth
+// (2026-09-09, tools/night-0909-fasweep.sh): for head size 256 the single-stream row (ncols = 2, GQA pair) is best at 64 threads with
+// occupancy 8 and 64-row KV tiles -- one die tg128 at 32K 19.61 -> 20.05 tok/s (+2.3%), four dies unchanged, perplexity unchanged.
+// alex4300's MI50 rows (128 threads at ncols 2, 128-row K tiles at 4..16, 512 threads at 32) lose here: -8% single stream at
+// depth, -10% on the draft-3 verify batch (ncols 8), and the ncols-32 row moves 16K perplexity by +0.4%. Rows 4..32 therefore stay
+// on the generic AMD table until a sweep of those columns on this box says otherwise.
 static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_amd_gcn(const int DKQ, const int DV, const int ncols) {
-    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  2, 128, 8,  64,  64)
-    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  4, 256, 2, 128,  64)
-    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  8, 256, 2, 128,  64)
-    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256, 16, 256, 2, 128,  64)
-    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256, 32, 512, 1, 128, 128)
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  2,  64, 8,  64,  64)
 
     return ggml_cuda_fattn_tile_get_config_amd(DKQ, DV, ncols);
 }
