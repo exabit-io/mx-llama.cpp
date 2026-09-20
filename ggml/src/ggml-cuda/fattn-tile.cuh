@@ -234,6 +234,21 @@ static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_am
     return 0;
 }
 
+// GCN (gfx906, Vega 20): the generic AMD table above is the RDNA2-inherited one. Head size 256 (Qwen3.8-27B: GQA 6, 16
+// KV heads of 256) was swept by alex4300 (llama.cpp-gfx906-opt, docs/gfx906/ergebnis-langkontext-2026-09-03.md) over
+// threads / occupancy / rows / columns per tile on an MI50 in the Qwen3.8 geometry at 16K f16 KV. us per layer, old -> new:
+// n=1 207 -> 191, n=2 267 -> 251, n=4 283 -> 261, n=8 451 -> 350; prefill batch 512: 23.8 -> 21.6 ms. Decode wants small
+// tiles at high occupancy, prefill large tiles at 512 threads. Other head sizes fall through to the generic AMD table.
+static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_amd_gcn(const int DKQ, const int DV, const int ncols) {
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  2, 128, 8,  64,  64)
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  4, 256, 2, 128,  64)
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  8, 256, 2, 128,  64)
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256, 16, 256, 2, 128,  64)
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256, 32, 512, 1, 128, 128)
+
+    return ggml_cuda_fattn_tile_get_config_amd(DKQ, DV, ncols);
+}
+
 static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_amd_rdna(const int DKQ, const int DV, const int ncols) {
     GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40,  2,  64, 2,  32,  40)
     GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40,  4, 128, 2,  32,  40)
@@ -317,6 +332,9 @@ static __host__ uint32_t ggml_cuda_fattn_tile_get_config(const int DKQ, const in
         if (GGML_CUDA_CC_IS_RDNA(cc)) {
             return ggml_cuda_fattn_tile_get_config_amd_rdna(DKQ, DV, ncols);
         }
+        if (GGML_CUDA_CC_IS_GCN(cc)) {
+            return ggml_cuda_fattn_tile_get_config_amd_gcn(DKQ, DV, ncols);
+        }
         return ggml_cuda_fattn_tile_get_config_amd(DKQ, DV, ncols);
     }
     if (fast_fp16_available(cc)) {
@@ -329,6 +347,8 @@ static constexpr __device__ uint32_t ggml_cuda_fattn_tile_get_config(const int D
 #ifdef GGML_USE_HIP
 #ifdef RDNA
     return ggml_cuda_fattn_tile_get_config_amd_rdna(DKQ, DV, ncols);
+#elif defined(GCN)
+    return ggml_cuda_fattn_tile_get_config_amd_gcn(DKQ, DV, ncols);
 #else
     return ggml_cuda_fattn_tile_get_config_amd(DKQ, DV, ncols);
 #endif // RDNA
