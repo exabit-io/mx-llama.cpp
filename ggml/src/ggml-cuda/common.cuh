@@ -460,7 +460,7 @@ struct ggml_cuda_unroll<1> {
     }
 };
 
-#if defined(GGML_USE_HIP) && defined(GCN)
+#if defined(GGML_USE_HIP) && defined(GCN) && !defined(GGML_GCN_NO_DPP)
 // GCN (Vega) DPP-based warp reductions.
 //
 // On GCN, __shfl_xor lowers to ds_bpermute_b32 — an LDS roundtrip plus
@@ -577,7 +577,7 @@ static __device__ __forceinline__ int ggml_gcn_warp_reduce_sum_i32(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ int warp_reduce_sum(int x) {
-#if defined(GGML_USE_HIP) && defined(GCN)
+#if defined(GGML_USE_HIP) && defined(GCN) && !defined(GGML_GCN_NO_DPP)
     return ggml_gcn_warp_reduce_sum_i32<width>(x);
 #elif !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
     return __reduce_add_sync(0xffffffff, x);
@@ -592,7 +592,7 @@ static __device__ __forceinline__ int warp_reduce_sum(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
-#if defined(GGML_USE_HIP) && defined(GCN)
+#if defined(GGML_USE_HIP) && defined(GCN) && !defined(GGML_GCN_NO_DPP)
     return ggml_gcn_warp_reduce_sum_f32<width>(x);
 #else
 #pragma unroll
@@ -605,7 +605,7 @@ static __device__ __forceinline__ float warp_reduce_sum(float x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float2 warp_reduce_sum(float2 a) {
-#if defined(GGML_USE_HIP) && defined(GCN)
+#if defined(GGML_USE_HIP) && defined(GCN) && !defined(GGML_GCN_NO_DPP)
     a.x = ggml_gcn_warp_reduce_sum_f32<width>(a.x);
     a.y = ggml_gcn_warp_reduce_sum_f32<width>(a.y);
     return a;
@@ -662,7 +662,7 @@ static __device__ __forceinline__ int warp_reduce_any(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_max(float x) {
-#if defined(GGML_USE_HIP) && defined(GCN)
+#if defined(GGML_USE_HIP) && defined(GCN) && !defined(GGML_GCN_NO_DPP)
     return ggml_gcn_warp_reduce_max_f32<width>(x);
 #else
 #pragma unroll
