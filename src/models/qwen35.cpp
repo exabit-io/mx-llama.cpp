@@ -559,8 +559,11 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
     // n_outputs-conditional: the deferred-prefill / KV-only replay decodes with n_outputs == 0
     // (batch logits all 0). build_inp_out_ids() would then make a 0-size out_ids whose buffer is
     // never allocated, tripping the buffer assert in llm_graph_input_out_ids::set_input. Skip it
-    // when there is nothing to select (n_outputs == 0, or == n_tokens where the rows are identity).
-    ggml_tensor * inp_out_ids = n_outputs > 0 && n_outputs < n_tokens ? build_inp_out_ids() : nullptr;
+    // when there is nothing to select (n_outputs == 0). Keep it when n_outputs == n_tokens: the graph topology must not
+    // depend on how many tokens are outputs (upstream keeps the input for that reason); with the backend-sampled draft
+    // tokens of the b10589 merge, skipping it collapsed the draft acceptance of sequence 0 to 0.03-0.10 whenever a
+    // second sequence decoded concurrently (-np 2). Found and bisected by alex4300 (llama.cpp-gfx906-opt, 2026-09-07).
+    ggml_tensor * inp_out_ids = n_outputs > 0 ? build_inp_out_ids() : nullptr;
 
     auto * inp_attn = build_attn_inp_kv();
 
