@@ -1,3 +1,6 @@
+// The flash-attention kernels keep the generic (ds_bpermute) warp reductions on GCN: with the DPP reductions the
+// attention-heavy prefill at 32K depth on one die read -3.6% (night 2026-09-09, n3 vs n2) for +0.5% decode.
+#define GGML_GCN_NO_DPP
 #include "common.cuh"
 #include "fattn-common.cuh"
 
