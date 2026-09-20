@@ -4625,6 +4625,154 @@ static void ggml_cuda_add_rms_norm_log_once(const ggml_tensor * add) {
     }
 }
 
+// gfx906 fusion 2026-09-08, S3 step 3: fold the GATED_DELTA_NET's small producers into the GDN kernel. At a producer
+// node (L2_NORM of q or k, the beta SIGMOID, or the ADD(dt_bias) -> SOFTPLUS -> MUL(ssm_a) gate chain) walk its single-use
+// chain forward through view ops to a GATED_DELTA_NET; when it lands, record the raw inputs under the GDN node and skip
+// the producer(s). M1 trace: 96 l2_norm + 48 sigmoid + 48 add + 48 gated-softplus launches per token. GGML_CUDA_GDN_PREFUSE=0
+// disables. Returns true when node i must not be computed.
+static bool ggml_cuda_gdn_prefuse_producer(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, const int i) {
+    static const bool enabled = [] {
+        const char * e = getenv("GGML_CUDA_GDN_PREFUSE");
+        return e == nullptr || atoi(e) != 0;
+    }();
+    const ggml_tensor * node = cgraph->nodes[i];
+    if (ctx.gdn_prefuse_skip.count(node)) {
+        return true;
+    }
+    if (!enabled || node->type != GGML_TYPE_F32) {
+        return false;
+    }
+    enum { NONE, L2, SIG, ALPHA } kind = NONE;
+    if (node->op == GGML_OP_L2_NORM) {
+        kind = L2;
+    } else if (node->op == GGML_OP_UNARY && ggml_get_unary_op(node) == GGML_UNARY_OP_SIGMOID) {
+        kind = SIG;
+    } else if (node->op == GGML_OP_ADD) {
+        kind = ALPHA;
+    } else {
+        return false;
+    }
+    auto is_view_like = [](const ggml_tensor * t) {
+        return t->op == GGML_OP_RESHAPE || t->op == GGML_OP_VIEW || t->op == GGML_OP_PERMUTE || t->op == GGML_OP_TRANSPOSE;
+    };
+    auto find_consumer = [&](int idx, int & src_idx) -> int {
+        const ggml_tensor * t = cgraph->nodes[idx];
+        for (int j = idx + 1; j < cgraph->n_nodes && j <= idx + 32; ++j) {
+            for (int k = 0; k < GGML_MAX_SRC; ++k) {
+                if (cgraph->nodes[j]->src[k] == t) {
+                    src_idx = k;
+                    return j;
+                }
+            }
+        }
+        return -1;
+    };
+    // walk forward
+    std::vector<const ggml_tensor *> chain;   // compute nodes (beyond node i) that the fold replaces
+    const ggml_tensor * mul_a = nullptr;
+    const ggml_tensor * gdn   = nullptr;
+    int role = -1;
+    int idx  = i;
+    for (int hop = 0; hop < 6 && gdn == nullptr; ++hop) {
+        if (!ggml_node_has_n_uses(cgraph, idx, 1)) {
+            return false;
+        }
+        int src_idx = -1;
+        const int j = find_consumer(idx, src_idx);
+        if (j < 0) {
+            return false;
+        }
+        const ggml_tensor * cons = cgraph->nodes[j];
+        if (cons->op == GGML_OP_GATED_DELTA_NET) {
+            gdn  = cons;
+            role = src_idx;
+            break;
+        }
+        if (is_view_like(cons)) {
+            idx = j;
+            continue;
+        }
+        if (kind == ALPHA && chain.empty() && cons->op == GGML_OP_UNARY &&
+            ggml_get_unary_op(cons) == GGML_UNARY_OP_SOFTPLUS && cons->src[0] == cgraph->nodes[idx] && cons->type == GGML_TYPE_F32) {
+            chain.push_back(cons);
+            idx = j;
+            continue;
+        }
+        if (kind == ALPHA && chain.size() == 1 && cons->op == GGML_OP_MUL && cons->type == GGML_TYPE_F32 &&
+            (cons->src[0] == cgraph->nodes[idx] || cons->src[1] == cgraph->nodes[idx])) {
+            mul_a = cons->src[0] == cgraph->nodes[idx] ? cons->src[1] : cons->src[0];
+            chain.push_back(cons);
+            idx = j;
+            continue;
+        }
+        return false;
+    }
+    if (gdn == nullptr || (gdn->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
+        return false;
+    }
+    ggml_backend_cuda_context::gdn_prefuse_info & info = ctx.gdn_prefuse[gdn];
+    const ggml_tensor * raw = node->src[0];
+    if (kind == L2) {
+        if (role != 0 && role != 1) {
+            return false;
+        }
+        // q and k are folded together or not at all (the kernel needs identical strides for both)
+        const ggml_tensor * other = gdn->src[1 - role];
+        auto l2_ok = [&](const ggml_tensor * n) {
+            return n->op == GGML_OP_L2_NORM && n->type == GGML_TYPE_F32 && n->src[0]->type == GGML_TYPE_F32 &&
+                   n->src[0]->nb[0] == sizeof(float) && ggml_are_same_shape(n, n->src[0]);
+        };
+        if (!l2_ok(node) || !l2_ok(other) || other == node || gdn->src[role] != node) {
+            return false;
+        }
+        // 'other' must be used only by the GDN
+        int other_idx = -1;
+        for (int j = i + 1; j < cgraph->n_nodes && j <= i + 32; ++j) {
+            if (cgraph->nodes[j] == other) { other_idx = j; break; }
+        }
+        if (other_idx < 0 || !ggml_node_has_n_uses(cgraph, other_idx, 1) ||
+            !ggml_are_same_stride(node->src[0], other->src[0]) || (other->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
+            return false;
+        }
+        const ggml_tensor * qn = role == 0 ? node : other;
+        const ggml_tensor * kn = role == 0 ? other : node;
+        info.q_raw = qn->src[0]; memcpy(&info.eps_q, qn->op_params, sizeof(float));
+        info.k_raw = kn->src[0]; memcpy(&info.eps_k, kn->op_params, sizeof(float));
+        ctx.gdn_prefuse_skip.insert(node);
+        ctx.gdn_prefuse_skip.insert(other);
+    } else if (kind == SIG) {
+        if (role != 4 || raw->type != GGML_TYPE_F32 || !ggml_is_contiguous(raw) || !ggml_is_contiguous(node) ||
+            !ggml_are_same_shape(node, raw)) {
+            return false;
+        }
+        info.beta_raw = raw;
+        ctx.gdn_prefuse_skip.insert(node);
+    } else { // ALPHA
+        const ggml_tensor * bias = node->src[1];
+        const int64_t H = node->ne[0];
+        if (role != 3 || chain.size() != 2 || gdn->src[3]->ne[0] != 1 ||    // non-KDA gate only
+            raw->type != GGML_TYPE_F32 || !ggml_is_contiguous(raw) || !ggml_is_contiguous(node) || !ggml_are_same_shape(node, raw) ||
+            bias->type != GGML_TYPE_F32 || !ggml_is_contiguous(bias) || ggml_nelements(bias) != H ||
+            mul_a == nullptr || mul_a->type != GGML_TYPE_F32 || !ggml_is_contiguous(mul_a) || ggml_nelements(mul_a) != H ||
+            !ggml_are_same_shape(chain[0], node) || !ggml_are_same_shape(chain[1], node)) {
+            return false;
+        }
+        info.alpha_raw = raw;
+        info.dt_bias   = bias;
+        info.ssm_a     = mul_a;
+        ctx.gdn_prefuse_skip.insert(node);
+        for (const ggml_tensor * c : chain) {
+            ctx.gdn_prefuse_skip.insert(c);
+        }
+    }
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        GGML_LOG_INFO("%s: gated_delta_net producer fusion active (first: %s)\n", __func__, ggml_op_name(node->op));
+    }
+    return true;
+}
+
 // try and fuse nodes and return the number of nodes to skip
 static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
 
@@ -5602,6 +5750,10 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     continue;
                 }
 
+                if (ggml_cuda_gdn_prefuse_producer(*cuda_ctx, cgraph, i)) {
+                    continue;
+                }
+
                 int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
 
                 if (nodes_to_skip != 0) {
@@ -5756,6 +5908,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 
     // entries are only valid within one graph evaluation
     cuda_ctx->q8_1_cache_reset();
+    cuda_ctx->gdn_prefuse_reset();
 
     bool use_cuda_graph             = false;
     bool cuda_graph_update_required = false;

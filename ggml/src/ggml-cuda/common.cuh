@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1621,6 +1622,26 @@ struct ggml_backend_cuda_context {
     bool cublas_chunk_logged = false;
     void q8_1_cache_reset() {
         q8_1_cache.clear();
+    }
+
+    // gfx906 fusion 2026-09-08, S3 step 3: producers folded into a later GATED_DELTA_NET (q/k L2 norms, the beta
+    // sigmoid, the softplus gate with its bias and A scale). Filled while walking the graph, keyed by the GDN node;
+    // the producer nodes in gdn_prefuse_skip are not computed. Reset per graph evaluation.
+    struct gdn_prefuse_info {
+        const ggml_tensor * q_raw     = nullptr;
+        const ggml_tensor * k_raw     = nullptr;
+        float               eps_q     = 0.0f;
+        float               eps_k     = 0.0f;
+        const ggml_tensor * beta_raw  = nullptr;
+        const ggml_tensor * alpha_raw = nullptr;
+        const ggml_tensor * dt_bias   = nullptr;
+        const ggml_tensor * ssm_a     = nullptr;
+    };
+    std::unordered_map<const ggml_tensor *, gdn_prefuse_info> gdn_prefuse;
+    std::unordered_set<const ggml_tensor *>                   gdn_prefuse_skip;
+    void gdn_prefuse_reset() {
+        gdn_prefuse.clear();
+        gdn_prefuse_skip.clear();
     }
 
     ~ggml_backend_cuda_context();
