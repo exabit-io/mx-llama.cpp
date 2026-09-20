@@ -129,7 +129,7 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
 #define GGML_MMVQ_GCN_NWARPS1 2
 #endif
 #ifndef GGML_MMVQ_GCN_Q8_VDR8_1COL
-#define GGML_MMVQ_GCN_Q8_VDR8_1COL 0
+#define GGML_MMVQ_GCN_Q8_VDR8_1COL 1
 #endif
 #ifndef GGML_MMVQ_GCN_ROWS_HI
 #define GGML_MMVQ_GCN_ROWS_HI 2
