@@ -119,6 +119,18 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
 #endif
 // Rows per block for 9-16 columns when GGML_MMVQ_GCN_ROWS is used for 2-8 (0 = same as GGML_MMVQ_GCN_ROWS). Measured 2026-09-07:
 // rows 4 wins up to 8 columns, rows 2 wins at 9-16 (48-64 accumulators per thread otherwise).
+// S6 batch-1 knobs (2026-09-08, M1 trace: the single-column kernel streams at 68% of HBM on the split and on one die alike):
+// rows per block and warps per block at ONE column (upstream GCN: 1 row, 2 warps, so every block re-reads the whole y vector),
+// and the whole-block (vdr 8) load restricted to one column (it was +2-5% at batch 1 and a loser at batch 8).
+#ifndef GGML_MMVQ_GCN_ROWS1
+#define GGML_MMVQ_GCN_ROWS1 1
+#endif
+#ifndef GGML_MMVQ_GCN_NWARPS1
+#define GGML_MMVQ_GCN_NWARPS1 2
+#endif
+#ifndef GGML_MMVQ_GCN_Q8_VDR8_1COL
+#define GGML_MMVQ_GCN_Q8_VDR8_1COL 0
+#endif
 #ifndef GGML_MMVQ_GCN_ROWS_HI
 #define GGML_MMVQ_GCN_ROWS_HI 2
 #endif
@@ -506,6 +518,7 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
     } else if (table_id == MMVQ_PARAMETERS_GCN) {
         switch (ncols_dst) {
             case 1:
+                return GGML_MMVQ_GCN_NWARPS1;
             case 2:
             case 3:
             case 4:
@@ -624,7 +637,7 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
     if (table_id == MMVQ_PARAMETERS_GENERIC || table_id == MMVQ_PARAMETERS_GCN || table_id == MMVQ_PARAMETERS_TURING || table_id == MMVQ_PARAMETERS_GB10) {
         switch (ncols_dst) {
             case 1:
-                return small_k ? nwarps : 1;
+                return small_k ? nwarps : (table_id == MMVQ_PARAMETERS_GCN ? GGML_MMVQ_GCN_ROWS1 : 1);
             case 2:
             case 3:
             case 4:
@@ -665,10 +678,11 @@ static __global__ void mul_mat_vec_q(
 
     constexpr int qk  = ggml_cuda_type_traits<type>::qk;
     constexpr int qi  = ggml_cuda_type_traits<type>::qi;
-    constexpr int vdr = get_vdr_mmvq(type);
     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
+    constexpr bool q8_fast = GGML_MMVQ_GCN_Q8_FASTPATH && type == GGML_TYPE_Q8_0 && !has_fusion && table_id == MMVQ_PARAMETERS_GCN;
+    constexpr int vdr = (q8_fast && (GGML_MMVQ_GCN_Q8_VDR8 || (GGML_MMVQ_GCN_Q8_VDR8_1COL && ncols_dst == 1))) ? 8 : get_vdr_mmvq(type);
     constexpr int nwarps = calc_nwarps(type, ncols_dst, table_id, small_k, halve_iters);
-    constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id, small_k, nwarps);
+    constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id, small_k, nwarps, GGML_MMVQ_GCN_Q8_LDS_Y && type == GGML_TYPE_Q8_0);
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 
     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
