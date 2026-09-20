@@ -2,6 +2,32 @@
 #include "gated_delta_net_chunk.cuh"
 #include "ggml-cuda/common.cuh"
 
+// Sum of squares of the head vector this warp holds (rows_per_lane values per lane), reproducing the standalone
+// l2_norm_f32<32> bit for bit where the shapes allow it: that kernel runs 32 threads per row, thread t accumulating
+// x[t], x[t+32], x[t+64], x[t+96] in that order (fused multiply-adds), then a 32-wide xor tree. With a 64-lane warp holding
+// x[lane] and x[lane+64], lane t < 32 fetches x[t+32] and x[t+96] from lane t+32 and repeats that order; lanes 32-63 then
+// take the result from lane t-32. Other shapes fall back to a plain reduction (same values up to rounding order).
+template <int warp_size, int rows_per_lane>
+static __device__ __forceinline__ float gdn_l2_sumsq(const float * v, const int lane) {
+    if constexpr (warp_size == 64 && rows_per_lane == 2) {
+        const float x32 = __shfl_xor_sync(0xffffffff, v[0], 32, 64);
+        const float x96 = __shfl_xor_sync(0xffffffff, v[1], 32, 64);
+        float tmp = fmaf(v[0], v[0], 0.0f);
+        tmp = fmaf(x32, x32, tmp);
+        tmp = fmaf(v[1], v[1], tmp);
+        tmp = fmaf(x96, x96, tmp);
+        tmp = warp_reduce_sum<32>(tmp);
+        return __shfl_sync(0xffffffff, tmp, lane & 31, 64);
+    } else {
+        float ss = 0.0f;
+#pragma unroll
+        for (int r = 0; r < rows_per_lane; r++) {
+            ss += v[r] * v[r];
+        }
+        return warp_reduce_sum<warp_size>(ss);
+    }
+}
+
 template <int S_v, bool KDA, bool keep_rs_t>
 __global__ void __launch_bounds__((ggml_cuda_get_physical_warp_size() < S_v ? ggml_cuda_get_physical_warp_size() : S_v) * 4, 2)
 gated_delta_net_cuda(const float * q,
@@ -85,26 +111,14 @@ gated_delta_net_cuda(const float * q,
         // folded L2 norms (same arithmetic as l2_norm_f32: x * rsqrt(max(sum x^2, eps^2)) over the head vector, which
         // this warp holds in full across its lanes)
         if (pf.norm_k) {
-            float ss = 0.0f;
-#pragma unroll
-            for (int r = 0; r < rows_per_lane; r++) {
-                ss += k_reg[r] * k_reg[r];
-            }
-            ss = warp_reduce_sum<warp_size>(ss);
-            const float sc = rsqrtf(fmaxf(ss, pf.eps_k * pf.eps_k));
+            const float sc = rsqrtf(fmaxf(gdn_l2_sumsq<warp_size, rows_per_lane>(k_reg, lane), pf.eps_k * pf.eps_k));
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
                 k_reg[r] *= sc;
             }
         }
         if (pf.norm_q) {
-            float ss = 0.0f;
-#pragma unroll
-            for (int r = 0; r < rows_per_lane; r++) {
-                ss += q_reg[r] * q_reg[r];
-            }
-            ss = warp_reduce_sum<warp_size>(ss);
-            const float sc = rsqrtf(fmaxf(ss, pf.eps_q * pf.eps_q));
+            const float sc = rsqrtf(fmaxf(gdn_l2_sumsq<warp_size, rows_per_lane>(q_reg, lane), pf.eps_q * pf.eps_q));
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
                 q_reg[r] *= sc;
