@@ -53,7 +53,8 @@ gated_delta_net_cuda(const float * q,
                                      float         scale,
                                      int64_t       state_slot_stride,
                                      int           K,
-                                     const gdn_replay_args rep) {
+                                     const gdn_replay_args rep,
+                                     const ggml_cuda_gdn_prefuse_dev pf) {
     const uint32_t h_idx    = blockIdx.x;
     const uint32_t sequence = blockIdx.y;
 
@@ -149,7 +150,7 @@ gated_delta_net_cuda(const float * q,
         const float * beta_t = beta + gb_offset;
         const float * g_t    = g    + gb_offset * (KDA ? S_v : 1);
 
-        const float beta_val = *beta_t;
+        const float beta_val = pf.sig_b ? 1.0f / (1.0f + expf(-*beta_t)) : *beta_t;
 
         // Cache k and q in registers
         float k_reg[rows_per_lane];
@@ -159,6 +160,34 @@ gated_delta_net_cuda(const float * q,
             const int i = r * lanes_per_col + lane_in_col;
             k_reg[r] = k_t[i];
             q_reg[r] = q_t[i];
+        }
+        // folded L2 norms (same arithmetic as l2_norm_f32: x * rsqrt(max(sum x^2, eps^2)) over the head vector, which
+        // each column segment of this warp holds in full across its lanes_per_col lanes)
+        if (pf.norm_k) {
+            float ss = 0.0f;
+#pragma unroll
+            for (int r = 0; r < rows_per_lane; r++) {
+                ss += k_reg[r] * k_reg[r];
+            }
+            ss = warp_reduce_sum<lanes_per_col>(ss);
+            const float sc = rsqrtf(fmaxf(ss, pf.eps_k * pf.eps_k));
+#pragma unroll
+            for (int r = 0; r < rows_per_lane; r++) {
+                k_reg[r] *= sc;
+            }
+        }
+        if (pf.norm_q) {
+            float ss = 0.0f;
+#pragma unroll
+            for (int r = 0; r < rows_per_lane; r++) {
+                ss += q_reg[r] * q_reg[r];
+            }
+            ss = warp_reduce_sum<lanes_per_col>(ss);
+            const float sc = rsqrtf(fmaxf(ss, pf.eps_q * pf.eps_q));
+#pragma unroll
+            for (int r = 0; r < rows_per_lane; r++) {
+                q_reg[r] *= sc;
+            }
         }
 
         if constexpr (replay && !KDA) {
@@ -183,7 +212,14 @@ gated_delta_net_cuda(const float * q,
         }
 
         if constexpr (!KDA) {
-            const float g_val = expf(*g_t);
+            float gv = *g_t;
+            if (pf.gate_alpha) {
+                // folded ADD(dt_bias) -> softplus -> MUL(ssm_a), same formulas as the unary kernels
+                gv = gv + pf.dt_bias[h_idx];
+                gv = (gv > 20.0f) ? gv : logf(1.0f + expf(gv));
+                gv = gv * pf.ssm_a[h_idx];
+            }
+            const float g_val = expf(gv);
 
             // kv[col] = (S^T @ k)[col] = sum_i S[i][col] * k[i]
             float kv_shard = 0.0f;
@@ -285,13 +321,15 @@ static void launch_gated_delta_net(
         int64_t sv1,   int64_t sv2, int64_t sv3,
         int64_t sb1,   int64_t sb2, int64_t sb3,
         int64_t neqk1, int64_t rq3,
-        float scale, int64_t state_slot_stride, int K, const gdn_replay_args & rep, cudaStream_t stream) {
-    // The column-thread and chunked kernels neither replay pending tokens nor store the inputs of the new ones:
-    // an op with replay inputs (see ggml_gated_delta_net_ext) runs on the recurrent kernel below.
+        float scale, int64_t state_slot_stride, int K, const gdn_replay_args & rep, const ggml_cuda_gdn_prefuse_dev & pf,
+        cudaStream_t stream) {
+    // The column-thread and chunked kernels neither replay pending tokens nor store the inputs of the new ones, and
+    // they do not apply the producers folded into pf: an op with replay inputs (see ggml_gated_delta_net_ext) and a
+    // folded call run on the recurrent kernel below. Prefill, which the fold does not reach (> 64 rows), still takes them.
     if constexpr (!replay) {
         const int CS = KDA ? 16 : 64;
 
-        if (launch_gated_delta_net_colthread<KDA, keep_rs_t>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
+        if (!pf.folded() && launch_gated_delta_net_colthread<KDA, keep_rs_t>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
                 S_v, H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                 sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream)) {
             return;
@@ -303,7 +341,7 @@ static void launch_gated_delta_net(
             const char * value = getenv("LLAMA_GDN_NO_CHUNK_SNAPSHOTS");
             return value != nullptr && atoi(value) != 0;
         }();
-        const bool chunk_eligible = n_tokens >= 2 * CS && S_v <= 128;
+        const bool chunk_eligible = n_tokens >= 2 * CS && S_v <= 128 && !pf.folded();
 
         static bool chunk_snap_announced = false;
         if constexpr (keep_rs_t) {
@@ -347,26 +385,26 @@ static void launch_gated_delta_net(
             ggml_cuda_kernel_launch(gated_delta_net_cuda<16, KDA, keep_rs_t, replay>, launch_params,
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
-                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K, rep);
+                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K, rep, pf);
             break;
         case 32:
             ggml_cuda_kernel_launch(gated_delta_net_cuda<32, KDA, keep_rs_t, replay>, launch_params,
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
-                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K, rep);
+                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K, rep, pf);
             break;
         case 64: {
             ggml_cuda_kernel_launch(gated_delta_net_cuda<64, KDA, keep_rs_t, replay>, launch_params,
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
-                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K, rep);
+                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K, rep, pf);
             break;
         }
         case 128: {
             ggml_cuda_kernel_launch(gated_delta_net_cuda<128, KDA, keep_rs_t, replay>, launch_params,
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
-                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K, rep);
+                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K, rep, pf);
             break;
         }
         default:
@@ -443,28 +481,56 @@ static void ggml_cuda_op_gated_delta_net_impl(
     GGML_ASSERT(nek3 == neq3);
     const int64_t rq3 = nev3 / neq3;
 
-    const float * q_d = (const float *) src_q->data;
-    const float * k_d = (const float *) src_k->data;
+    // S3 step 3: producers folded into this kernel (recorded by ggml_cuda_gdn_prefuse_producer while walking the graph)
+    ggml_cuda_gdn_prefuse_dev pf;
+    const ggml_tensor * q_eff = src_q;
+    const ggml_tensor * k_eff = src_k;
+    const ggml_tensor * g_eff = src_g;
+    const ggml_tensor * b_eff = src_beta;
+    {
+        const auto it = ctx.gdn_prefuse.find(dst);
+        if (it != ctx.gdn_prefuse.end()) {
+            const ggml_backend_cuda_context::gdn_prefuse_info & info = it->second;
+            GGML_ASSERT((info.q_raw == nullptr) == (info.k_raw == nullptr));
+            if (info.q_raw) {
+                q_eff = info.q_raw; k_eff = info.k_raw;
+                pf.norm_q = true; pf.norm_k = true; pf.eps_q = info.eps_q; pf.eps_k = info.eps_k;
+            }
+            if (info.beta_raw) {
+                b_eff = info.beta_raw; pf.sig_b = true;
+            }
+            if (info.alpha_raw) {
+                GGML_ASSERT(!kda);
+                g_eff = info.alpha_raw; pf.gate_alpha = true;
+                pf.dt_bias = (const float *) info.dt_bias->data;
+                pf.ssm_a   = (const float *) info.ssm_a->data;
+            }
+        }
+    }
+    const float * q_d = (const float *) q_eff->data;
+    const float * k_d = (const float *) k_eff->data;
     const float * v_d = (const float *) src_v->data;
-    const float * g_d = (const float *) src_g->data;
-    const float * b_d = (const float *) src_beta->data;
+    const float * g_d = (const float *) g_eff->data;
+    const float * b_d = (const float *) b_eff->data;
 
     const float * s_d   = (const float *) src_state->data;
     float *       dst_d = (float *) dst->data;
 
-    GGML_ASSERT(ggml_is_contiguous_rows(src_q));
-    GGML_ASSERT(ggml_is_contiguous_rows(src_k));
+    GGML_ASSERT(ggml_is_contiguous_rows(q_eff));
+    GGML_ASSERT(ggml_is_contiguous_rows(k_eff));
     GGML_ASSERT(ggml_is_contiguous_rows(src_v));
-    GGML_ASSERT(ggml_are_same_stride(src_q, src_k));
+    GGML_ASSERT(ggml_are_same_stride(q_eff, k_eff));
+    GGML_ASSERT(ggml_is_contiguous(g_eff) && ggml_is_contiguous(b_eff));
     GGML_ASSERT(src_g->ne[0] == 1 || kda);
     GGML_ASSERT(ggml_is_contiguous(src_g));
     GGML_ASSERT(ggml_is_contiguous(src_beta));
     GGML_ASSERT(ggml_is_contiguous(src_state));
 
     // strides in floats (beta strides used for both g and beta offset computation)
-    const int64_t sq1 = nbq1 / sizeof(float);
-    const int64_t sq2 = nbq2 / sizeof(float);
-    const int64_t sq3 = nbq3 / sizeof(float);
+    const int64_t sq1 = q_eff->nb[1] / sizeof(float);
+    const int64_t sq2 = q_eff->nb[2] / sizeof(float);
+    const int64_t sq3 = q_eff->nb[3] / sizeof(float);
+    GGML_UNUSED(nbq1); GGML_UNUSED(nbq2); GGML_UNUSED(nbq3);
     const int64_t sv1 = nbv1 / sizeof(float);
     const int64_t sv2 = nbv2 / sizeof(float);
     const int64_t sv3 = nbv3 / sizeof(float);
@@ -520,13 +586,17 @@ static void ggml_cuda_op_gated_delta_net_impl(
         }
     }
 
+    // the replay keeps the graph's k, g and beta of each token pending, which a folded call has not computed
+    GGML_ASSERT(!(src_pend && pf.folded()));
+
 #define GDN_LAUNCH_N(KDA, KEEP, REPLAY, N_TOKENS, REP) \
     launch_gated_delta_net<KDA, KEEP, REPLAY>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, \
         S_v, H, N_TOKENS, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3, \
-        sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, REP, stream)
+        sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, REP, pf, stream)
 #define GDN_LAUNCH(KDA, KEEP, REPLAY) GDN_LAUNCH_N(KDA, KEEP, REPLAY, n_tokens, rep)
 
-    if (!src_pend) {
+    // the MMA kernel reads the graph's q/k/g/beta, which a folded call has not computed
+    if (!src_pend && !pf.folded()) {
         ggml_cuda_gdn_mma_args args = ggml_cuda_gdn_mma_args_from_tensor(dst);
         args.state_out = state_d;
         if (ggml_cuda_gdn_mma_launch(ctx.device, args, stream)) {
