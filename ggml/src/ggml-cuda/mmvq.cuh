@@ -1,6 +1,7 @@
 #include "common.cuh"
 
-#define MMVQ_MAX_BATCH_SIZE 8 // Max. batch size for which to use MMVQ kernels.
+#define MMVQ_MAX_BATCH_SIZE 16 // Max. batch size for which to use MMVQ kernels (dense MUL_MAT; raised from 8 for gfx906 evaluation).
+#define MMVQ_MMID_MAX_BATCH_SIZE 8 // Max. batch size for the MUL_MAT_ID (MoE) MMVQ path; unchanged.
 
 bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11);
 
