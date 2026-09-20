@@ -4652,6 +4652,9 @@ static bool ggml_cuda_gdn_prefuse_producer(ggml_backend_cuda_context & ctx, cons
     enum { NONE, L2, SIG, ALPHA } kind = NONE;
     if (node->op == GGML_OP_L2_NORM && (mask & 1)) {
         kind = L2;
+    } else if (node->op == GGML_OP_RMS_NORM && (mask & 1) && i + 1 < cgraph->n_nodes && cgraph->nodes[i + 1]->op == GGML_OP_SCALE &&
+               cgraph->nodes[i + 1]->src[0] == node) {
+        kind = L2;      // upstream build_gdn_l2_norm: scale(rms_norm(x, eps/n), 1/sqrt(n)); handled as an L2 fold of kind 1
     } else if (node->op == GGML_OP_UNARY && ggml_get_unary_op(node) == GGML_UNARY_OP_SIGMOID && (mask & 2)) {
         kind = SIG;
     } else if (node->op == GGML_OP_ADD && (mask & 4)) {
@@ -4699,6 +4702,11 @@ static bool ggml_cuda_gdn_prefuse_producer(ggml_backend_cuda_context & ctx, cons
             idx = j;
             continue;
         }
+        if (kind == L2 && node->op == GGML_OP_RMS_NORM && chain.empty() && cons->op == GGML_OP_SCALE && cons->src[0] == cgraph->nodes[idx]) {
+            chain.push_back(cons);
+            idx = j;
+            continue;
+        }
         if (kind == ALPHA && chain.empty() && cons->op == GGML_OP_UNARY &&
             ggml_get_unary_op(cons) == GGML_UNARY_OP_SOFTPLUS && cons->src[0] == cgraph->nodes[idx] && cons->type == GGML_TYPE_F32) {
             chain.push_back(cons);
@@ -4728,30 +4736,57 @@ static bool ggml_cuda_gdn_prefuse_producer(ggml_backend_cuda_context & ctx, cons
         if (role != 0 && role != 1) {
             return false;
         }
-        // q and k are folded together or not at all (the kernel needs identical strides for both)
-        const ggml_tensor * other = gdn->src[1 - role];
+        // q and k are folded together or not at all (the kernel needs identical strides for both).
+        // Two shapes: L2_NORM directly (fork / older upstream), or RMS_NORM -> SCALE (upstream build_gdn_l2_norm).
+        const bool rmsn = node->op == GGML_OP_RMS_NORM;
+        const ggml_tensor * mine  = rmsn ? chain[0] : node;          // the node the GDN consumes
+        const ggml_tensor * other = gdn->src[1 - role];              // the sibling's consumed node
+        auto norm_of = [&](const ggml_tensor * consumed) -> const ggml_tensor * {
+            if (!rmsn) { return consumed->op == GGML_OP_L2_NORM ? consumed : nullptr; }
+            return (consumed->op == GGML_OP_SCALE && consumed->src[0]->op == GGML_OP_RMS_NORM && consumed->src[0]->src[1] == nullptr) ? consumed->src[0] : nullptr;
+        };
         auto l2_ok = [&](const ggml_tensor * n) {
-            return n->op == GGML_OP_L2_NORM && n->type == GGML_TYPE_F32 && n->src[0]->type == GGML_TYPE_F32 &&
+            return n != nullptr && n->type == GGML_TYPE_F32 && n->src[0]->type == GGML_TYPE_F32 &&
                    n->src[0]->nb[0] == sizeof(float) && ggml_are_same_shape(n, n->src[0]);
         };
-        if (!l2_ok(node) || !l2_ok(other) || other == node || gdn->src[role] != node) {
+        const ggml_tensor * other_norm = norm_of(other);
+        if (!l2_ok(node) || !l2_ok(other_norm) || other == mine || gdn->src[role] != mine) {
             return false;
         }
-        // 'other' must be used only by the GDN
-        int other_idx = -1;
+        if (rmsn) {
+            float b0 = 0.0f, b1 = 0.0f;
+            memcpy(&b0, (const char *) mine->op_params + sizeof(float), sizeof(float));
+            memcpy(&b1, (const char *) other->op_params + sizeof(float), sizeof(float));
+            if (b0 != 0.0f || b1 != 0.0f) {   // SCALE with a bias is not this pattern
+                return false;
+            }
+        }
+        // the sibling's norm (and its scale) must be used only on the way to the GDN
+        int other_idx = -1, other_norm_idx = -1;
         for (int j = i + 1; j < cgraph->n_nodes && j <= i + 32; ++j) {
-            if (cgraph->nodes[j] == other) { other_idx = j; break; }
+            if (cgraph->nodes[j] == other) { other_idx = j; }
+            if (cgraph->nodes[j] == other_norm) { other_norm_idx = j; }
         }
-        if (other_idx < 0 || !ggml_node_has_n_uses(cgraph, other_idx, 1) ||
-            !ggml_are_same_stride(node->src[0], other->src[0]) || (other->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
+        if (other_idx < 0 || !ggml_node_has_n_uses(cgraph, other_idx, 1) || (other->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 ||
+            (rmsn && (other_norm_idx < 0 || !ggml_node_has_n_uses(cgraph, other_norm_idx, 1))) ||
+            !ggml_are_same_stride(node->src[0], other_norm->src[0])) {
             return false;
         }
-        const ggml_tensor * qn = role == 0 ? node : other;
-        const ggml_tensor * kn = role == 0 ? other : node;
+        const ggml_tensor * qn = role == 0 ? node : other_norm;
+        const ggml_tensor * kn = role == 0 ? other_norm : node;
         info.q_raw = qn->src[0]; memcpy(&info.eps_q, qn->op_params, sizeof(float));
         info.k_raw = kn->src[0]; memcpy(&info.eps_k, kn->op_params, sizeof(float));
+        info.norm_kind = rmsn ? 1 : 0;
+        if (rmsn) {
+            const ggml_tensor * qs = role == 0 ? mine : other;
+            const ggml_tensor * ks = role == 0 ? other : mine;
+            memcpy(&info.scale_q, qs->op_params, sizeof(float));
+            memcpy(&info.scale_k, ks->op_params, sizeof(float));
+            ctx.gdn_prefuse_skip.insert(mine);
+            ctx.gdn_prefuse_skip.insert(other);
+        }
         ctx.gdn_prefuse_skip.insert(node);
-        ctx.gdn_prefuse_skip.insert(other);
+        ctx.gdn_prefuse_skip.insert(other_norm);
     } else if (kind == SIG) {
         if (role != 4 || raw->type != GGML_TYPE_F32 || !ggml_is_contiguous(raw) || !ggml_is_contiguous(node) ||
             !ggml_are_same_shape(node, raw)) {

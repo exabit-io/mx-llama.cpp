@@ -111,14 +111,18 @@ gated_delta_net_cuda(const float * q,
         // folded L2 norms (same arithmetic as l2_norm_f32: x * rsqrt(max(sum x^2, eps^2)) over the head vector, which
         // this warp holds in full across its lanes)
         if (pf.norm_k) {
-            const float sc = rsqrtf(fmaxf(gdn_l2_sumsq<warp_size, rows_per_lane>(k_reg, lane), pf.eps_k * pf.eps_k));
+            const float ssk = gdn_l2_sumsq<warp_size, rows_per_lane>(k_reg, lane);
+            const float sc  = pf.norm_kind == 0 ? rsqrtf(fmaxf(ssk, pf.eps_k * pf.eps_k))
+                                                : rsqrtf(ssk * (1.0f / S_v) + pf.eps_k) * pf.scale_k;
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
                 k_reg[r] *= sc;
             }
         }
         if (pf.norm_q) {
-            const float sc = rsqrtf(fmaxf(gdn_l2_sumsq<warp_size, rows_per_lane>(q_reg, lane), pf.eps_q * pf.eps_q));
+            const float ssq = gdn_l2_sumsq<warp_size, rows_per_lane>(q_reg, lane);
+            const float sc  = pf.norm_kind == 0 ? rsqrtf(fmaxf(ssq, pf.eps_q * pf.eps_q))
+                                                : rsqrtf(ssq * (1.0f / S_v) + pf.eps_q) * pf.scale_q;
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
                 q_reg[r] *= sc;
@@ -344,6 +348,7 @@ static void ggml_cuda_op_gated_delta_net_impl(
             if (info.q_raw) {
                 q_eff = info.q_raw; k_eff = info.k_raw;
                 pf.norm_q = true; pf.norm_k = true; pf.eps_q = info.eps_q; pf.eps_k = info.eps_k;
+                pf.norm_kind = info.norm_kind; pf.scale_q = info.scale_q; pf.scale_k = info.scale_k;
             }
             if (info.beta_raw) {
                 b_eff = info.beta_raw; pf.sig_b = true;

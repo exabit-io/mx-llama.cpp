@@ -1632,6 +1632,9 @@ struct ggml_backend_cuda_context {
         const ggml_tensor * k_raw     = nullptr;
         float               eps_q     = 0.0f;
         float               eps_k     = 0.0f;
+        int                 norm_kind = 0;      // 0 L2_NORM, 1 RMS_NORM(eps/n) + SCALE(1/sqrt n)
+        float               scale_q   = 1.0f;
+        float               scale_k   = 1.0f;
         const ggml_tensor * beta_raw  = nullptr;
         const ggml_tensor * alpha_raw = nullptr;
         const ggml_tensor * dt_bias   = nullptr;
