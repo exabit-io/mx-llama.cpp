@@ -45,7 +45,7 @@ void ggml_cuda_mul_mat_repacked(ggml_backend_cuda_context & ctx,
     const int64_t ne10_padded = GGML_PAD(ne10, MATRIX_ROW_PADDING);
     const int64_t x_stride    = ne10_padded / QK8_1;
 
-    if (ne11 >= 1 && ne11 <= MMQ_RP_Q8_MMV_MAX_TOKENS) {
+    if (ne11 >= 1 && ne11 <= rp_mmv_max_tokens(src0->type)) {
         // One token, or a narrow batch: plain Q8_1 rows, one weight pass. The
         // tiled path below computes a full 32-wide tile whatever the batch is.
         ggml_cuda_pool_alloc<block_q8_1> src1_q8_1_own;
@@ -270,6 +270,78 @@ static void ggml_cuda_mul_mat_repacked_nc_t(
             const dim3 grid((ne01 + 1) / 2, 1, 1);
             mul_mat_vec_repacked_nc<2, 1, 8, 2, 64, WT><<<grid, 64, 0, stream>>>(
                 w, xq, dst_d, (uint32_t) ne00, (uint32_t) ne01, xs, ys);
+        } break;
+        case 9: {
+            if constexpr (WT == GGML_TYPE_Q8_0) {
+                const dim3 grid((ne01 + 1) / 2, 1, 1);
+                mul_mat_vec_repacked_nc<2, 1, 9, 2, 64, WT><<<grid, 64, 0, stream>>>(
+                    w, xq, dst_d, (uint32_t) ne00, (uint32_t) ne01, xs, ys);
+            } else {
+                GGML_ABORT("nc mat-vec: widths 9-16 are Q8_0 only");
+            }
+        } break;
+        case 10: {
+            if constexpr (WT == GGML_TYPE_Q8_0) {
+                const dim3 grid((ne01 + 1) / 2, 1, 1);
+                mul_mat_vec_repacked_nc<2, 1, 10, 2, 64, WT><<<grid, 64, 0, stream>>>(
+                    w, xq, dst_d, (uint32_t) ne00, (uint32_t) ne01, xs, ys);
+            } else {
+                GGML_ABORT("nc mat-vec: widths 9-16 are Q8_0 only");
+            }
+        } break;
+        case 11: {
+            if constexpr (WT == GGML_TYPE_Q8_0) {
+                const dim3 grid((ne01 + 1) / 2, 1, 1);
+                mul_mat_vec_repacked_nc<2, 1, 11, 2, 64, WT><<<grid, 64, 0, stream>>>(
+                    w, xq, dst_d, (uint32_t) ne00, (uint32_t) ne01, xs, ys);
+            } else {
+                GGML_ABORT("nc mat-vec: widths 9-16 are Q8_0 only");
+            }
+        } break;
+        case 12: {
+            if constexpr (WT == GGML_TYPE_Q8_0) {
+                const dim3 grid((ne01 + 1) / 2, 1, 1);
+                mul_mat_vec_repacked_nc<2, 1, 12, 2, 64, WT><<<grid, 64, 0, stream>>>(
+                    w, xq, dst_d, (uint32_t) ne00, (uint32_t) ne01, xs, ys);
+            } else {
+                GGML_ABORT("nc mat-vec: widths 9-16 are Q8_0 only");
+            }
+        } break;
+        case 13: {
+            if constexpr (WT == GGML_TYPE_Q8_0) {
+                const dim3 grid((ne01 + 1) / 2, 1, 1);
+                mul_mat_vec_repacked_nc<2, 1, 13, 2, 64, WT><<<grid, 64, 0, stream>>>(
+                    w, xq, dst_d, (uint32_t) ne00, (uint32_t) ne01, xs, ys);
+            } else {
+                GGML_ABORT("nc mat-vec: widths 9-16 are Q8_0 only");
+            }
+        } break;
+        case 14: {
+            if constexpr (WT == GGML_TYPE_Q8_0) {
+                const dim3 grid((ne01 + 1) / 2, 1, 1);
+                mul_mat_vec_repacked_nc<2, 1, 14, 2, 64, WT><<<grid, 64, 0, stream>>>(
+                    w, xq, dst_d, (uint32_t) ne00, (uint32_t) ne01, xs, ys);
+            } else {
+                GGML_ABORT("nc mat-vec: widths 9-16 are Q8_0 only");
+            }
+        } break;
+        case 15: {
+            if constexpr (WT == GGML_TYPE_Q8_0) {
+                const dim3 grid((ne01 + 1) / 2, 1, 1);
+                mul_mat_vec_repacked_nc<2, 1, 15, 2, 64, WT><<<grid, 64, 0, stream>>>(
+                    w, xq, dst_d, (uint32_t) ne00, (uint32_t) ne01, xs, ys);
+            } else {
+                GGML_ABORT("nc mat-vec: widths 9-16 are Q8_0 only");
+            }
+        } break;
+        case 16: {
+            if constexpr (WT == GGML_TYPE_Q8_0) {
+                const dim3 grid((ne01 + 1) / 2, 1, 1);
+                mul_mat_vec_repacked_nc<2, 1, 16, 2, 64, WT><<<grid, 64, 0, stream>>>(
+                    w, xq, dst_d, (uint32_t) ne00, (uint32_t) ne01, xs, ys);
+            } else {
+                GGML_ABORT("nc mat-vec: widths 9-16 are Q8_0 only");
+            }
         } break;
         default: GGML_ABORT("nc mat-vec: unsupported batch width");
     }
