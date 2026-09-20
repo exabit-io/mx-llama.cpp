@@ -4590,6 +4590,41 @@ static void * ggml_cuda_rms_norm_q8_target(ggml_backend_cuda_context & ctx, cons
     return buf;
 }
 
+// gfx906 fusion 2026-09-08, S3 step 2: the residual ADD that feeds a fused RMS_NORM+MUL[+ADD] is computed inside the norm
+// kernel (its output is still written: the residual stream is used again). The ADD keeps its second use, so this is not
+// expressible with ggml_can_fuse; the norm/mul part is checked with the regular predicate. GGML_CUDA_ADD_NORM=0 disables.
+static bool ggml_cuda_add_rms_norm_fusable(const ggml_cgraph * cgraph, const int i) {
+    static const bool enabled = [] {
+        const char * e = getenv("GGML_CUDA_ADD_NORM");
+        return e == nullptr || atoi(e) != 0;
+    }();
+    if (!enabled || i + 2 >= cgraph->n_nodes) {
+        return false;
+    }
+    const ggml_tensor * add  = cgraph->nodes[i];
+    const ggml_tensor * norm = cgraph->nodes[i + 1];
+    if (add->op != GGML_OP_ADD || norm->op != GGML_OP_RMS_NORM || norm->src[0] != add) {
+        return false;
+    }
+    if ((add->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 || add->type != GGML_TYPE_F32 ||
+        add->src[0]->type != GGML_TYPE_F32 || add->src[1]->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (!ggml_is_contiguous(add) || !ggml_is_contiguous(add->src[0]) || !ggml_is_contiguous(add->src[1]) ||
+        !ggml_are_same_shape(add, add->src[0]) || !ggml_are_same_shape(add, add->src[1])) {
+        return false;
+    }
+    return true;
+}
+
+static void ggml_cuda_add_rms_norm_log_once(const ggml_tensor * add) {
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        GGML_LOG_INFO("%s: add + rms_norm fusion active (ncols %" PRId64 ", rows %" PRId64 ")\n", __func__, add->ne[0], add->ne[1]);
+    }
+}
+
 // try and fuse nodes and return the number of nodes to skip
 static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
 
@@ -5362,6 +5397,21 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ROPE }, {})) {
         ggml_cuda_op_rms_norm_mul_rope_fused(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2], nullptr);
         return 2;
+    }
+
+    if (ggml_cuda_add_rms_norm_fusable(cgraph, i)) {
+        if (ggml_cuda_can_fuse(cgraph, i + 1, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ADD }, {})) {
+            void * q8_out = ggml_cuda_rms_norm_q8_target(*cuda_ctx, cgraph, i + 3);
+            ggml_cuda_op_rms_norm_fused_add(*cuda_ctx, cgraph->nodes[i + 1], cgraph->nodes[i + 2], cgraph->nodes[i + 3], q8_out, node);
+            ggml_cuda_add_rms_norm_log_once(node);
+            return 3;
+        }
+        if (ggml_cuda_can_fuse(cgraph, i + 1, { GGML_OP_RMS_NORM, GGML_OP_MUL }, {})) {
+            void * q8_out = ggml_cuda_rms_norm_q8_target(*cuda_ctx, cgraph, i + 2);
+            ggml_cuda_op_rms_norm_fused(*cuda_ctx, cgraph->nodes[i + 1], cgraph->nodes[i + 2], q8_out, node);
+            ggml_cuda_add_rms_norm_log_once(node);
+            return 2;
+        }
     }
 
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ADD }, {})) {
