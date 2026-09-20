@@ -4610,6 +4610,11 @@ static bool ggml_cuda_add_rms_norm_fusable(const ggml_cgraph * cgraph, const int
         add->src[0]->type != GGML_TYPE_F32 || add->src[1]->type != GGML_TYPE_F32) {
         return false;
     }
+    // decode-sized batches only: the fusion saves a launch, which is nothing at prefill, and the fused kernel re-reads
+    // the sum it just wrote (L2-resident for a few rows, an extra HBM pass at 2048)
+    if (ggml_nrows(add) > 64) {
+        return false;
+    }
     if (!ggml_is_contiguous(add) || !ggml_is_contiguous(add->src[0]) || !ggml_is_contiguous(add->src[1]) ||
         !ggml_are_same_shape(add, add->src[0]) || !ggml_are_same_shape(add, add->src[1])) {
         return false;
@@ -4708,6 +4713,11 @@ static bool ggml_cuda_gdn_prefuse_producer(ggml_backend_cuda_context & ctx, cons
         return false;
     }
     if (gdn == nullptr || (gdn->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
+        return false;
+    }
+    // decode only (the fold saves launches; at prefill the standalone kernels run once per ubatch anyway, and the
+    // strided raw q/k views would be walked token by token inside the GDN kernel)
+    if (gdn->src[2]->ne[2] > 64) {   // v: [S_v, H_v, n_tokens, n_seqs]
         return false;
     }
     ggml_backend_cuda_context::gdn_prefuse_info & info = ctx.gdn_prefuse[gdn];
