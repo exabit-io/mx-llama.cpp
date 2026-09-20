@@ -4636,10 +4636,12 @@ static void ggml_cuda_add_rms_norm_log_once(const ggml_tensor * add) {
 // the producer(s). M1 trace: 96 l2_norm + 48 sigmoid + 48 add + 48 gated-softplus launches per token. GGML_CUDA_GDN_PREFUSE=0
 // disables. Returns true when node i must not be computed.
 static bool ggml_cuda_gdn_prefuse_producer(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, const int i) {
-    static const bool enabled = [] {
+    // GGML_CUDA_GDN_PREFUSE: unset = all folds; 0 = off; else a bitmask: 1 = q/k L2 norms, 2 = beta sigmoid, 4 = gate chain
+    static const int mask = [] {
         const char * e = getenv("GGML_CUDA_GDN_PREFUSE");
-        return e == nullptr || atoi(e) != 0;
+        return (e == nullptr || e[0] == '\0') ? 7 : atoi(e);
     }();
+    const bool enabled = mask != 0;
     const ggml_tensor * node = cgraph->nodes[i];
     if (ctx.gdn_prefuse_skip.count(node)) {
         return true;
@@ -4648,11 +4650,11 @@ static bool ggml_cuda_gdn_prefuse_producer(ggml_backend_cuda_context & ctx, cons
         return false;
     }
     enum { NONE, L2, SIG, ALPHA } kind = NONE;
-    if (node->op == GGML_OP_L2_NORM) {
+    if (node->op == GGML_OP_L2_NORM && (mask & 1)) {
         kind = L2;
-    } else if (node->op == GGML_OP_UNARY && ggml_get_unary_op(node) == GGML_UNARY_OP_SIGMOID) {
+    } else if (node->op == GGML_OP_UNARY && ggml_get_unary_op(node) == GGML_UNARY_OP_SIGMOID && (mask & 2)) {
         kind = SIG;
-    } else if (node->op == GGML_OP_ADD) {
+    } else if (node->op == GGML_OP_ADD && (mask & 4)) {
         kind = ALPHA;
     } else {
         return false;
@@ -6111,12 +6113,15 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
     GGML_UNUSED(cgraph);
 #endif
 
-    static bool enable_graph_optimization = [] {
+    // GGML_CUDA_GRAPH_OPT=1: multi-stream execution of independent nodes, single device only (upstream);
+    // =2: also on the tensor-split lanes, where every lane has its own context and streams (gfx906 2026-09-08 experiment:
+    // on the split the small kernels are latency-bound and serialised in one stream).
+    static int enable_graph_optimization = [] {
         const char * env     = getenv("GGML_CUDA_GRAPH_OPT");
-        return env != nullptr && atoi(env) == 1;
+        return env != nullptr ? atoi(env) : 0;
     }();
 
-    if (!enable_graph_optimization) {
+    if (enable_graph_optimization <= 0) {
         return;
     }
 
