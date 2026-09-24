@@ -1,29 +1,23 @@
-# Branch topology (current, 2026-09-24)
+# Branches of exabit-io/mx-llama.cpp (2026-09-24)
 
-**Substrate: [`exabit-io/mx-llama.cpp` branch `merge-v0.5.0`](https://github.com/exabit-io/mx-llama.cpp/tree/merge-v0.5.0)
-(`528384980`)** — mxxm-t's gfx906 fork ([`mxxm-t/mx-llama.cpp`](https://github.com/mxxm-t/mx-llama.cpp) @ `eefc4e732`,
-its 182 commits kept individually) merged with llama.cpp **v0.5.0** (`7fe450e`), plus RCCL on by default. It is the
-substrate for every gfx906 build here until mxxm-t merges it
-([mxxm-t/mx-llama.cpp#17](https://github.com/mxxm-t/mx-llama.cpp/pull/17)); after that, mxxm-t's `master` is.
+This repository is Exabit's only llama.cpp code repository for gfx906 (Radeon Pro Vega II / MI50). It is a fork of
+[mxxm-t/mx-llama.cpp](https://github.com/mxxm-t/mx-llama.cpp), Marko Tombak's gfx906 fork of llama.cpp.
 
-| branch | commit | contents |
-|---|---|---|
-| `gfx906-required` | `528384980` | the substrate, exactly |
-| `gfx906-both` | `a23e12438` | required + the `GGML_TP_AR_MAX_NE` size gate (default 20481) + `GGML_CUDA_FA_QUANTS=all` default — the patches binned as improving **both** profiles |
-| `gfx906-single`, `gfx906-multi` | `a23e12438` | gfx906-both + the patches binned for that profile only (none yet) |
-| `c4-series` | this branch | the Exabit code patches on the substrate, awaiting their bins |
+| branch | what it is |
+|---|---|
+| `master` | **the substrate**: mxxm-t's master merged with the latest llama.cpp release (today v0.5.0, `7fe450e`) + RCCL on by default. Offered to mxxm-t as [PR #17](https://github.com/mxxm-t/mx-llama.cpp/pull/17); once merged, `master` tracks mxxm-t's master. |
+| `merge-v0.5.0` | the branch PR #17 was opened from (same commit as `master`); deleted when the PR is merged |
+| `gfx906-both` | `master` + the patches binned as improving **both** the single-user and the multi-user profile |
+| `gfx906-single` | `gfx906-both` + patches that improve the single-user profile only |
+| `gfx906-multi` | `gfx906-both` + patches that improve the multi-user profile only |
+| `gfx906-candidates` | `master` + Exabit patches not yet binned (this branch) |
 
-Each branch's own commits are its bin: `git log gfx906-both ^gfx906-required` is the `both` set. The branches move; every
-state they pass through is an annotated tag (`gfx906/mx-merge-v0.5.0/*` now; `gfx906/v0.5.0+mxxm-t-eefc4e732/*`,
-`gfx906/v0.5.0/*`, `gfx906/v0.4.1/*`, `import/*` before).
+Each branch's own commits are its bin: `git log gfx906-both ^master` is the `both` set. On every upstream release:
+merge it into `master`, offer that to mxxm-t, then move the four `gfx906-*` branches onto the new `master`.
+Every state is pinned by an annotated tag (`gfx906/v0.5.0/r0/*` for today's).
 
-## Build
+Build: `cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx906`. `gfx906-both` and the branches on it default
+`GGML_CUDA_FA_QUANTS=all` and `GGML_TP_AR_MAX_NE=20481`; `master` defaults `GGML_HIP_RCCL=ON`.
 
-    cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx906
-
-`gfx906-both` and the branches built on it default `GGML_HIP_RCCL=ON` and `GGML_CUDA_FA_QUANTS=all`; both are required
-(an uncompiled FlashAttention K/V pair silently falls back to f16, and without RCCL tensor split falls back to the
-meta-backend butterfly). `GGML_TP_AR_MAX_NE` defaults to 20481 because the substrate turns the custom AllReduce on by
-default and its own 262144 threshold costs ~19% prefill at 4 x 64K.
-
-`BRANCHES-v041.md` describes the earlier v0.4.1 topology and are kept as history.
+Measurements, plans and records: [exabit-io/llama.cpp-gfx906-tuning](https://github.com/exabit-io/llama.cpp-gfx906-tuning).
+History before 2026-09-24 (the v0.4.1 and earlier branches): [exabit-io/llama.cpp](https://github.com/exabit-io/llama.cpp).
