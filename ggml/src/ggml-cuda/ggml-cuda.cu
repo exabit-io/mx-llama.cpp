@@ -1270,8 +1270,12 @@ static bool ggml_backend_cuda_comm_allreduce_custom_prepare(
     // NCCL/RCCL). gfx906 XGMI hive 2026-09-08: the peer-write broadcast wins at one decode row (+14% single stream)
     // and loses at 8-16 rows (-8%), so the default 262144 is far too high there.
     static const int64_t s_max_ne = []{
+        // gfx906 default 20481 (four decode rows): binned `both` (survey/tp-ar-size-gate.md). Without it the fork's
+        // 262144 fallback sends prefill-size messages through the custom path, measured -19% prefill at 4x64K,
+        // and since mxxm 41c46cedb custom AR is on by default, so the unset case is the shipping case.
+        // GGML_TP_AR_MAX_NE=0 restores the fork's heuristic.
         const char * e = getenv("GGML_TP_AR_MAX_NE");
-        return (e && e[0] != '\0') ? (int64_t) atoll(e) : (int64_t) 0;
+        return (e && e[0] != '\0') ? (int64_t) atoll(e) : (int64_t) 20481;
     }();
     bool eligible = true;
     if (s_max_ne > 0) {
