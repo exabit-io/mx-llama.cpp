@@ -216,7 +216,9 @@ set_property(CACHE GGML_CUDA_COMPRESSION_MODE PROPERTY STRINGS "none;speed;balan
 
 option(GGML_HIP                             "ggml: use HIP"                                   OFF)
 option(GGML_HIP_GRAPHS                      "ggml: use HIP graph"                              ON)
-option(GGML_HIP_RCCL                        "ggml: use ROCm Collective Comm. Library"         OFF)
+# ON by default: the tensor-parallel AllReduce and the meta backend use RCCL when it is present; without it
+# tensor split falls back to the meta-backend butterfly (measured -18.6% prefill, 4x MI50, 4x64K). -DGGML_HIP_RCCL=OFF opts out.
+option(GGML_HIP_RCCL                        "ggml: use ROCm Collective Comm. Library"         ON)
 option(GGML_HIP_NO_VMM                      "ggml: do not try to use HIP VMM"                 ON)
 option(GGML_HIP_MMQ_MFMA                    "ggml: enable MFMA MMA for CDNA in MMQ"           ON)
 option(GGML_HIP_EXPORT_METRICS              "ggml: enable kernel perf metrics output"         OFF)
