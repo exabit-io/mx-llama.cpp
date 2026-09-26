@@ -223,6 +223,10 @@ option(GGML_HIP_RCCL                        "ggml: use ROCm Collective Comm. Lib
 option(GGML_HIP_NO_VMM                      "ggml: do not try to use HIP VMM"                 ON)
 option(GGML_HIP_MMQ_MFMA                    "ggml: enable MFMA MMA for CDNA in MMQ"           ON)
 option(GGML_HIP_EXPORT_METRICS              "ggml: enable kernel perf metrics output"         OFF)
+# ON by default: gfx906 HIP code is compiled with LLVM's max-ilp scheduler (the flag mixa3607/ML-gfx906 ships). Binned
+# 'both' in round 1b (2026-09-25) as part of the stack with norm-add-fusion, gdn-producer-fold, dpp-warp-reductions and
+# mmvq-q8-fastpath: +2.53% decode at 4x64K, +2.57% at 1x255K on Qwen3.8-27B Q8_0, four MI50. -DGGML_HIP_GFX906_MAX_ILP=OFF opts out.
+option(GGML_HIP_GFX906_MAX_ILP              "ggml: gfx906: -mllvm -amdgpu-sched-strategy=max-ilp" ON)
 option(GGML_MUSA_GRAPHS                     "ggml: use MUSA graph, experimental, unstable"    OFF)
 option(GGML_MUSA_MUDNN_COPY                 "ggml: enable muDNN for accelerated copy"         OFF)
 option(GGML_VULKAN                          "ggml: use Vulkan"                                OFF)
