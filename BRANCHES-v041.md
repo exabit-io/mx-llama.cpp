@@ -1,4 +1,4 @@
-> **History.** Superseded 2026-09-24 by [BRANCHES.md](BRANCHES.md): the substrate is now `exabit-io/mx-llama.cpp` `merge-v0.5.0` on llama.cpp v0.5.0.
+> **History.** Superseded 2026-09-24 by [BRANCHES.md](BRANCHES.md): the substrate moved to `exabit-io/mx-llama.cpp` `merge-v0.5.0`, and on 2026-10-22 to `merge-v0.7.0`.
 
 # The v0.4.1 branch topology (2026-09-20 .. 22)
 
