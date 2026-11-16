@@ -122,11 +122,13 @@ if (GGML_HIP_GFX906_MAX_ILP AND "gfx906" IN_LIST CMAKE_HIP_ARCHITECTURES)
 endif()
 
 # LLVM 24 with max-ilp spills VGPRs in the inner loop of the head-256 tile kernels (16 in flash_attn_tile<256,256,16,2>, LLVM 23: 1): prefill -2.6% at 1x128K, -4.1% at 1x255K on Qwen3.8-27B Q8_0, four gfx906.
-# A scheduler VGPR limit of 90% removes the spills. The option does not exist before LLVM 24.
+# A scheduler VGPR limit removes the spills. The option changes every kernel of the object and each batch size runs another one:
+# 90% left 20 reloads per iteration in flash_attn_tile<256,256,4,2> (3 or 4 tokens per sequence: MTP verification of 3 drafted tokens,
+# decode -1.8% at 118K depth). 85% leaves none in any of the 34 kernels. The option does not exist before LLVM 24.
 if (GGML_HIP_GFX906_MAX_ILP AND "gfx906" IN_LIST CMAKE_HIP_ARCHITECTURES
         AND NOT CXX_IS_HIPCC AND CMAKE_HIP_COMPILER_VERSION VERSION_GREATER_EQUAL 24)
     set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda/template-instances/fattn-tile-instance-dkq256-dv256.cu"
-                 APPEND_STRING PROPERTY COMPILE_FLAGS " -mllvm -amdgpu-vgpr-threshold-percent=90")
+                 APPEND_STRING PROPERTY COMPILE_FLAGS " -mllvm -amdgpu-vgpr-threshold-percent=85")
 endif()
 
 if (NOT GGML_CUDA_FA)
