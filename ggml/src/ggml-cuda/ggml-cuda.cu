@@ -5957,6 +5957,11 @@ static bool ggml_cuda_gdn_prefuse_producer(ggml_backend_cuda_context & ctx, cons
     if (gdn == nullptr || (gdn->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
         return false;
     }
+    // An op with replay inputs (ggml_gated_delta_net_ext) keeps the graph's k, g and beta of its tokens pending for a
+    // later replay: they must be computed as the graph defines them, so nothing is folded into such an op.
+    if (gdn->src[6] != nullptr) {
+        return false;
+    }
     // decode only (the fold saves launches; at prefill the standalone kernels run once per ubatch anyway, and the
     // strided raw q/k views would be walked token by token inside the GDN kernel)
     if (gdn->src[2]->ne[2] > 64) {   // v: [S_v, H_v, n_tokens, n_seqs]
