@@ -123,7 +123,13 @@ endif()
 # decode -1.8% at 118K depth). 85% leaves none in any of the 34 kernels. The option does not exist before LLVM 24.
 if (GGML_HIP_GFX906_MAX_ILP AND "gfx906" IN_LIST CMAKE_HIP_ARCHITECTURES
         AND NOT CXX_IS_HIPCC AND CMAKE_HIP_COMPILER_VERSION VERSION_GREATER_EQUAL 24)
-    set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda/template-instances/fattn-tile-instance-dkq256-dv256.cu"
+    # The instance is named by K/V type since llama.cpp v1.1.0 (fattn-tile-instance-f16-f16-dkq256-dv256.cu). A property on
+    # a source that does not exist is silently ignored, so the name is looked up and a miss stops the configure.
+    file(GLOB GGML_HIP_TILE256_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda/template-instances/fattn-tile-instance-*dkq256-dv256.cu")
+    if (NOT GGML_HIP_TILE256_SRCS)
+        message(FATAL_ERROR "gfx906 with LLVM 24: no head-256 tile instance found for the VGPR limit (was the instance renamed?)")
+    endif()
+    set_property(SOURCE ${GGML_HIP_TILE256_SRCS}
                  APPEND_STRING PROPERTY COMPILE_FLAGS " -mllvm -amdgpu-vgpr-threshold-percent=85")
 endif()
 
