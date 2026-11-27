@@ -1679,20 +1679,31 @@ static bool ggml_backend_cuda_comm_allreduce_custom_prepare(
     if (!comm_ctx->custom_ar.broadcast_ok && s_have_nccl && !s_force_oneshot) {
         return false;
     }
-    // GGML_TP_AR_MAX_NE=<elements>: explicit size gate (messages with fewer elements take the custom path, the rest
-    // NCCL/RCCL). gfx906 XGMI hive 2026-09-08: the peer-write broadcast wins at one decode row (+14% single stream)
-    // and loses at 8-16 rows (-8%), so the default 262144 is far too high there.
-    static const int64_t s_max_ne = []{
-        // gfx906 default 20481 (four decode rows): binned `both` (survey/tp-ar-size-gate.md). Without it the fork's
-        // 262144 fallback sends prefill-size messages through the custom path, measured -19% prefill at 4x64K,
-        // and since mxxm 41c46cedb custom AR is on by default, so the unset case is the shipping case.
-        // GGML_TP_AR_MAX_NE=0 restores the fork's heuristic.
+    // GGML_TP_AR_MAX_NE=<elements>: explicit size gate. Messages with fewer elements take the custom path, the rest
+    // the regular one (NCCL/RCCL, or upstream's internal all-reduce in a build without it). GGML_TP_AR_MAX_NE=0 leaves
+    // only the fork's rank-aware threshold below, which applies with NCCL/RCCL.
+    // Unset, the gate is a measured default for gfx906 on one XGMI hive (Qwen3.8-27B, rows of 5120 elements):
+    //   four ranks and more: 81921, the custom path up to 16 rows. v1.1.0, 2026-11-27, four MI50s, decode per slot of
+    //     the custom path against RCCL at 8 / 12 / 16 / 24 / 32 / 48 rows per message: +14.3 % / +5.7 % / +1.9 % /
+    //     -2.8 % / -2.1 % / -5.1 % (17 to 23 rows not timed). The gain is the two-shot kernel's, which
+    //     tp-allreduce.cu selects from 8192 elements at four ranks and more; the fork's own 262144 keeps the custom
+    //     path on to 51 rows. In a build without NCCL/RCCL the custom path against the internal all-reduce is +28 %
+    //     at 8 rows and +12 % at 16, so the default is the same there (it is still +9 % ahead at 24 rows, and with
+    //     no gate at all prefill loses 24 %: such a build would want a wider gate than this, which was not looked for).
+    //   two and three ranks: 20481 (four rows). They stay on the broadcast kernel, which won at one row and lost at
+    //     8 to 16 rows (-8 %) when it was timed at four ranks on 2026-09-08; not timed since.
+    static const bool s_max_ne_set = []{
         const char * e = getenv("GGML_TP_AR_MAX_NE");
-        return (e && e[0] != '\0') ? (int64_t) atoll(e) : (int64_t) 20481;
+        return e && e[0] != '\0';
     }();
+    static const int64_t s_max_ne_env = []{
+        const char * e = getenv("GGML_TP_AR_MAX_NE");
+        return (e && e[0] != '\0') ? (int64_t) atoll(e) : (int64_t) 0;
+    }();
+    const int64_t max_ne = s_max_ne_set ? s_max_ne_env : (n_backends >= 4 ? (int64_t) 81921 : (int64_t) 20481);
     bool eligible = true;
-    if (s_max_ne > 0) {
-        eligible = ne < s_max_ne;
+    if (max_ne > 0) {
+        eligible = ne < max_ne;
     } else if (s_gate_on && s_have_nccl) {
         // Small-vs-large threshold from upstream's NCCL heuristic. Below this,
         // broadcast wins on TG by 14-30%; above this, NCCL BF16 ring is faster.
