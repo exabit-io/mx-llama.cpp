@@ -120,7 +120,11 @@ endif()
 # LLVM 24 with max-ilp spills VGPRs in the inner loop of the head-256 tile kernels (16 in flash_attn_tile<256,256,16,2>, LLVM 23: 1): prefill -2.6% at 1x128K, -4.1% at 1x255K on Qwen3.8-27B Q8_0, four gfx906.
 # A scheduler VGPR limit removes the spills. The option changes every kernel of the object and each batch size runs another one:
 # 90% left 20 reloads per iteration in flash_attn_tile<256,256,4,2> (3 or 4 tokens per sequence: MTP verification of 3 drafted tokens,
-# decode -1.8% at 118K depth). 85% leaves none in any of the 34 kernels. The option does not exist before LLVM 24.
+# decode -1.8% at 118K depth). 85% left none in any of the 34 kernels of llama.cpp v1.0.0. The option does not exist before LLVM 24.
+# llama.cpp v1.1.0 (upstream #32901 rewrote the kernel, 17 instances): 85% leaves 19 reloads per iteration in <8,1>, 90% two in <4,2>;
+# 88% and 75% leave none anywhere. Timed on four MI50s, Qwen3.8-27B Q8_0, against the same build with this one object by LLVM 23:
+# 88% is level at 4x64K and 1x255K (decode -0.1%, prefill +0.3..+0.5%) and +7.2% MTP decode at 118K depth; without a limit
+# prefill is -2.4% / -5.4%; 75% costs decode -2.3% / -7.0% and changes the text of an MTP run.
 if (GGML_HIP_GFX906_MAX_ILP AND "gfx906" IN_LIST CMAKE_HIP_ARCHITECTURES
         AND NOT CXX_IS_HIPCC AND CMAKE_HIP_COMPILER_VERSION VERSION_GREATER_EQUAL 24)
     # The instance is named by K/V type since llama.cpp v1.1.0 (fattn-tile-instance-f16-f16-dkq256-dv256.cu). A property on
@@ -130,7 +134,7 @@ if (GGML_HIP_GFX906_MAX_ILP AND "gfx906" IN_LIST CMAKE_HIP_ARCHITECTURES
         message(FATAL_ERROR "gfx906 with LLVM 24: no head-256 tile instance found for the VGPR limit (was the instance renamed?)")
     endif()
     set_property(SOURCE ${GGML_HIP_TILE256_SRCS}
-                 APPEND_STRING PROPERTY COMPILE_FLAGS " -mllvm -amdgpu-vgpr-threshold-percent=85")
+                 APPEND_STRING PROPERTY COMPILE_FLAGS " -mllvm -amdgpu-vgpr-threshold-percent=88")
 endif()
 
 if (NOT GGML_CUDA_FA)
