@@ -149,9 +149,18 @@ public:
     llama_dsv4_comp_state * get_hca_state() const;
     llama_dsv4_comp_state * get_lid_state() const;
 
+    // true with the tiers of DeepSeek-V4.1 in upstream's layout
+    bool is_v41_upstream() const;
+
+    // DeepSeek-V4.1 in upstream's layout only: layer whose compressed-KV storage `il` reads, -1 = no compressed KV
+    int32_t get_comp_read_layer(int32_t il) const;
+
     uint32_t get_n_rs_seq() const;
     const std::vector<uint32_t> & get_rs_idx() const;
     void update_rs_for_ubatches(const std::vector<llama_ubatch> & ubatches);
+
+    // copy the sources into their mirrors after a state read
+    void refill_comp_mirrors();
 
 private:
     llama_hparams hparams_raw;
@@ -168,6 +177,16 @@ private:
     // exact for d <= n tokens of the seq in that ubatch (d == n is the state before the ubatch)
     std::vector<uint32_t> rs_max;
 
+    // the three below are set for DeepSeek-V4.1 in upstream's layout only (init_comp_v41_upstream), empty otherwise
+
+    // [n_layer] storage layer -> layer whose rows it holds (itself, or the source of a mirror)
+    std::vector<int32_t> comp_il_src;
+
+    // [n_layer] layer -> layer whose compressed-KV storage it reads (itself, its V4.1 kv source or a mirror), -1 = none
+    std::vector<int32_t> comp_read;
+
+    bool comp_mirrors_stale = false;
+
     std::unique_ptr<llama_kv_cache_iswa> kv_raw;
     std::unique_ptr<llama_kv_cache>      kv_csa;
     std::unique_ptr<llama_kv_cache>      kv_hca;
@@ -177,6 +196,17 @@ private:
     std::unique_ptr<llama_dsv4_comp_state> lid_state;
 
     void clear_compressed(llama_seq_id seq_id, bool data);
+
+    // compressed caches and compressor states of DeepSeek-V4.1 in upstream's layout
+    void init_comp_v41_upstream(
+            const llama_model & model,
+                         bool   no_alloc,
+                    ggml_type   type_k,
+                    ggml_type   type_v,
+                         bool   v_trans,
+                         bool   offload,
+                     uint32_t   kv_size,
+        const layer_filter_cb & filter);
 };
 
 // DSV4 raw attention only uses the SWA half of kv_raw. The base half is kept
@@ -383,6 +413,9 @@ public:
     const comp_plan & get_hca_plan(const llama_ubatch & ubatch) const;
     const comp_plan & get_lid_plan(const llama_ubatch & ubatch) const;
 
+    // see llama_kv_cache_dsv4::get_comp_read_layer()
+    int32_t get_comp_read_layer(int32_t il) const;
+
 private:
     size_t i_next = 0;
 
@@ -415,4 +448,6 @@ private:
     mutable comp_plan reserve_plan_lid;
 
     const llama_memory_status status;
+
+    llama_kv_cache_dsv4 * kv = nullptr;
 };

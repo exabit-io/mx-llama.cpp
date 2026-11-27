@@ -185,6 +185,10 @@ The hyper-connection mix is shifted by one sublayer, so the mix a sublayer compu
 V4.1 ships no `output_hc_*` head tensors and reuses the mix the last stage computed, so their absence selects the fold rather than failing the load.
 The per-head query norm V4 applies is absent in V4.1 and is dropped.
 
+Two GGUF layouts load under `general.architecture = deepseek41`, chosen per file at load.
+A file that has `deepseek41.attention.kv_source_layers` and not `deepseek41.attention.kv_source_layer_ids` is in upstream llama.cpp's layout, which `convert_hf_to_gguf.py` and the public downloads produce (PLE keys, one `per_layer_token_embd.weight` table for all Engram layers), and runs upstream's implementation in `src/models/deepseek41-upstream.cpp`: lightning-indexer top-k with candidate blocks, per-device mirrors of the compressed cache, `LLAMA_DSV41_SPARSE=0` as its one gate.
+Every other file is taken as this fork's layout (`kv_source_layer_ids`, `engram.*` keys, one `blk.N.engram_embed` table per Engram layer) and runs the implementation this section describes, numbers and env gates included.
+
 Engram is an n-gram hash memory written into the hyper-connection residual at two layers.
 Each position hashes the 2-, 3- and 4-gram ending on it, once per head, giving row indices into that layer's table, and the rows become one key per hyper-connection copy plus a shared value added through a gate that measures how well the key matches the stream.
 The hash runs host side because it is int64 multiply, xor and modulo over the token history, none of which ggml has.

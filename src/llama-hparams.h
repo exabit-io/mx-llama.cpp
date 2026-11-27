@@ -449,7 +449,9 @@ struct llama_hparams {
     float    dsv4_hc_eps               = 0.0f;
     std::array<uint32_t, LLAMA_MAX_LAYERS> dsv4_compress_ratios;
 
-    // deepseek41
+    // deepseek41, GGUF in upstream's layout (llama_model_deepseek41_upstream)
+    // the fork's layout uses dsv41_n_kv_source and the engram_* fields above, and leaves these unset
+    bool dsv41_upstream = false;
     std::array<int32_t, LLAMA_MAX_LAYERS> dsv41_kv_src;   // layer whose compressed KV this layer reads, -1 = none
     std::array<int32_t, LLAMA_MAX_LAYERS> dsv41_topk_src; // layer whose top-k this layer uses, -1 = none
     int32_t  dsv41_cand_src         = -1;    // -1 = no candidate block selection

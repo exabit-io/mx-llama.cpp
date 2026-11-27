@@ -43,7 +43,8 @@
 #include <string>
 #include <vector>
 
-static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params & params) {
+// ml is the file being loaded, nullptr when only the architecture is known
+static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params & params, const llama_model_loader * ml) {
     switch (arch) {
         case LLM_ARCH_CLIP:
             return new llama_model_clip(params);
@@ -224,6 +225,10 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
         case LLM_ARCH_DEEPSEEK4:
             return new llama_model_deepseek4(params);
         case LLM_ARCH_DEEPSEEK41:
+            // two GGUF layouts under this arch: upstream's, and the fork's (also the default without a file)
+            if (ml != nullptr && llama_model_deepseek41_upstream::has_layout(*ml)) {
+                return new llama_model_deepseek41_upstream(params);
+            }
             return new llama_model_deepseek41(params);
         case LLM_ARCH_XING4_0:
             return new llama_model_xing4_0(params);
@@ -413,8 +418,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
 
 }
 
-llama_model * llama_model_create(llm_arch arch, const llama_model_params & params) {
-    llama_model * model = llama_model_mapping(arch, params);
+static llama_model * llama_model_create_impl(llm_arch arch, const llama_model_params & params, const llama_model_loader * ml) {
+    llama_model * model = llama_model_mapping(arch, params, ml);
 
     if (model != nullptr) {
         model->arch = arch;
@@ -426,13 +431,17 @@ llama_model * llama_model_create(llm_arch arch, const llama_model_params & param
     return model;
 }
 
+llama_model * llama_model_create(llm_arch arch, const llama_model_params & params) {
+    return llama_model_create_impl(arch, params, nullptr);
+}
+
 llama_model * llama_model_create(llama_model_loader & ml, const llama_model_params & params) {
     llm_arch arch = ml.get_arch();
     if (arch == LLM_ARCH_UNKNOWN) {
         throw std::runtime_error("unknown model architecture: '" + ml.get_arch_name() + "'");
     }
 
-    return llama_model_create(arch, params);
+    return llama_model_create_impl(arch, params, &ml);
 }
 
 // PLE gather table VRAM shard, opt in with LLAMA_PLE_SHARD=1. Upstream's default is
@@ -978,7 +987,8 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_0);
         }
 
-        if (llama_ple_shard_enabled()) {
+        // not DeepSeek-V4.1 in upstream's layout: its table holds one set of hash heads per Engram layer (ple_n_modules), which the head-to-device assignment below does not model, and its gather has no masked partial path
+        if (llama_ple_shard_enabled() && ud->model->arch != LLM_ARCH_DEEPSEEK41) {
             // Split the PLE table along its ROW axis so each device owns a contiguous
             // range of the gather rows. The key/value projections that consume the
             // gathered vector need no rule of their own - the partial gathers are
@@ -3176,8 +3186,9 @@ ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM
         buft_list_input = &engram_cpu_only;
     }
 
+    // also the Engram tables of DeepSeek-V4.1 in upstream's layout, which are never sharded (see llama_meta_device_get_split_state)
     if (tn.tensor == LLM_TENSOR_PER_LAYER_TOKEN_EMBD) {
-        if (llama_ple_shard_enabled() && params.split_mode == LLAMA_SPLIT_MODE_TENSOR &&
+        if (llama_ple_shard_enabled() && arch != LLM_ARCH_DEEPSEEK41 && params.split_mode == LLAMA_SPLIT_MODE_TENSOR &&
                 !pimpl->dev_layer.empty()) {
             buft_list_input = pimpl->dev_layer[0].buft_list;
             flags &= ~llama_model_loader::TENSOR_READ_LAZY;

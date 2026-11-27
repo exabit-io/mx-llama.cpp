@@ -1568,6 +1568,75 @@ struct llama_model_deepseek41 : public llama_model_deepseek4 {
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
 };
 
+// DeepSeek-V4.1 GGUF in upstream's layout (kv_source_layers, PLE keys, one per_layer_token_embd table): upstream's loader and graph.
+// Same arch as llama_model_deepseek41, which loads the fork's layout; llama_model_create() picks by has_layout().
+struct llama_model_deepseek41_upstream : public llama_model_deepseek4 {
+    llama_model_deepseek41_upstream(const struct llama_model_params & params) : llama_model_deepseek4(params) {}
+
+    // true if the GGUF has upstream's kv_source_layers key and not the fork's kv_source_layer_ids
+    static bool has_layout(const llama_model_loader & ml);
+
+    // llama_model_deepseek4 has the fork layout's token map under the same name; this layout fills llama_model's, which the saver writes
+    using llama_model::engram_token_map;
+
+    void load_arch_hparams(llama_model_loader & ml) override;
+    void load_arch_tensors(llama_model_loader & ml) override;
+    bool lid_k_hdmd() const override { return false; }
+
+    // Engram: the hash constants are hparams.ple_* (one module per Engram layer), hashed on the host (ggml has no int64 mul/xor/mod)
+    int engram_index(int il) const;
+
+    void engram_hash(int e, const llama_ubatch & ubatch, const std::vector<llama_token> & prev, std::vector<int32_t> & out) const;
+
+    struct graph : public llama_model_deepseek4::graph {
+        graph(const llm_graph_params & params);
+
+        // pre / post / comb weights without the collapse (upstream's build_hc_mixes), built by the base class's build_hc_pre
+        struct hc_mixes {
+            ggml_tensor * pre;
+            ggml_tensor * post;
+            ggml_tensor * comb;
+        };
+
+        hc_mixes build_hc_mixes(
+                ggml_tensor * x,
+                ggml_tensor * hc_fn,
+                ggml_tensor * hc_scale,
+                ggml_tensor * hc_base,
+                int il) const;
+
+        ggml_tensor * build_engram(
+                const llama_model_deepseek41_upstream & model,
+                ggml_tensor * x,
+                ggml_tensor * rows,
+                ggml_tensor * keep,
+                int il) const;
+
+        ggml_tensor * build_attention41(
+                const llama_model_deepseek41_upstream & model,
+                llm_graph_input_dsv4 * inp_dsv4,
+                ggml_tensor * cur,
+                ggml_tensor * inp_pos,
+                ggml_tensor * cand_pin,
+                int il);
+
+        std::vector<ggml_tensor *> topk_of; // top-k of each index source layer
+        std::vector<ggml_tensor *> comp_row_of; // [n_layer] new compressed rows of each kv source (for mirrors)
+        ggml_tensor * cand_sel    = nullptr; // candidate blocks of the candidate source layer
+        int64_t       cand_n_comp = 0;       // compressed rows the candidate source scored
+
+        // sparse path (LLAMA_DSV41_SPARSE=0 disables): fused indexer, FA bounded to window + top-k, decode gather
+        bool sparse = true;
+        // gather path, shared by layers with the same top-k: selected K rows per (storage layer, top-k source),
+        // the sorted top-k and the mask per top-k source (one input copy per split)
+        std::map<std::pair<int32_t, int32_t>, ggml_tensor *> gather_k_of;
+        std::map<int32_t, ggml_tensor *> gather_sel_of;
+        std::map<int32_t, ggml_tensor *> gather_mask_of;
+    };
+
+    std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
+};
+
 
 struct llama_model_deepseek2ocr : public llama_model_base {
     llama_model_deepseek2ocr(const struct llama_model_params & params) : llama_model_base(params) {}
