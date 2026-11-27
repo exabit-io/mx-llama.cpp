@@ -3552,7 +3552,7 @@ static bool ggml_cuda_mul_mat_id_needs_sync(const ggml_tensor * dst, const int c
         return true;
     }
 
-    // MUL_MAT_ID keeps the upstream 8-column MMVQ/MMVF window (MMVQ_MMID_MAX_BATCH_SIZE); the dense path is 16 wide on gfx906.
+    // MUL_MAT_ID keeps the upstream 8-column MMVQ/MMVF window (MMVQ_MMID_MAX_BATCH_SIZE), whatever MMVQ_MAX_BATCH_SIZE is for the dense path.
     // The predicate must mirror the dispatch in ggml_cuda_mul_mat_id, or a 9-16-token f16/bf16 expert product on AMD is
     // predicted "no sync" and then falls through to the sorted path (assert in test-backend-ops MUL_MAT_ID).
     if (dst->ne[2] <= MMVQ_MMID_MAX_BATCH_SIZE) {

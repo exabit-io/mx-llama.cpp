@@ -1,6 +1,10 @@
 #include "common.cuh"
 
-#define MMVQ_MAX_BATCH_SIZE 16 // Max. batch size for which to use MMVQ kernels (dense MUL_MAT; raised from 8 for gfx906 evaluation).
+// Max. batch size for which to use MMVQ kernels (dense MUL_MAT). gfx906 ran 16 here through v1.0.0 (2026-09-07, measured
+// on stock b10288). On v1.1.0 MMQ is ahead at every width timed from 10 to 16 columns, by 1.0 % rising to 1.8 % in decode
+// (four dies, Q8_0, 2026-11-27), so upstream's 8 again. The 9..16-column kernels stay in mmvq.cu: changing this one
+// number back is all a new comparison needs.
+#define MMVQ_MAX_BATCH_SIZE 8
 #define MMVQ_MMID_MAX_BATCH_SIZE 8 // Max. batch size for the MUL_MAT_ID (MoE) MMVQ path; unchanged.
 
 bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11);
